@@ -351,7 +351,7 @@ def plot_all(model, history, cases, N, t, train_days):
     print(f"MAE:  {mae:.0f} cases")
     print(f"MSE:  {mse:.4e}")
     print(f"R:    {corr:.4f}")
-    print(f"% infected:    {(S[0] - S[-1])/S[0]*100:.1f}%")
+    
     print(f"Beta range:    [{beta.min():.3f}, {beta.max():.3f}]")
     print(f"Ir peak:       {Ir.max()/1e3:.1f}k  (observed: {cases_np.max()/1e3:.1f}k)")
     print(f"Total dead:    {D[-1]/1e3:.1f}k")
