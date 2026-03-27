@@ -12,7 +12,7 @@ torch.manual_seed(56)
 #%%
 #Canada Data
 def get_canada_data():
-    df = pd.read_csv('/home/akhi/testdir/cases_can.csv')  
+    df = pd.read_csv('cases_can.csv')  
     df['date'] = pd.to_datetime(df['date'])
     inc_cases = df['value_daily'].rolling(window=7).mean().dropna()
     return inc_cases
@@ -81,7 +81,6 @@ def ode_loss(model, t, params, T_max):
     r_D = dDdt - T_max * (mu * H)
    
     return (r_S**2 + r_E**2 + r_Iu**2 + r_Ir**2 + r_H**2 + r_R**2 + r_D**2).mean()
-
 
 
 #%%
@@ -159,14 +158,16 @@ def ceic_data_loss(model, t_np, Ir_obs_np, params, T_max):
 #%%
 #Train model
 def train_model(epochs=40000, test_days=100):
+    
+    # general parameters used in the model
     N = 38000000
     params = (1/5.2, 1/14, 1/14, 0.5, 0.08, 1/21, 0.01)
-    ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0, 0.0, 0.0]
+    ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0, 0.0, 0.0] # no covid cases at the start, seed with 1 or 2 or 10
    
     cases = get_canada_data()
     total_days = len(cases)
-    Ir_obs = cases.values / N
-   
+    Ir_obs = cases.values / N # convert cases to a proportion
+    
     # Split into train and test
     train_days = total_days - test_days
     train_indices = np.arange(0, train_days)
@@ -177,10 +178,10 @@ def train_model(epochs=40000, test_days=100):
     # Full time tensor for evaluation
     t_np_full = np.linspace(0, 1, total_days, dtype=np.float32)
     t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-   
+    
     # Training time tensor (only training points)
-    t_train_np = t_np_full[train_indices]
-    Ir_train = Ir_obs[train_indices]
+    t_train_np = t_np_full[train_indices] # training time
+    Ir_train = Ir_obs[train_indices]      # and cases at those time points
    
     # Create model
     model = create_model()
@@ -200,7 +201,7 @@ def train_model(epochs=40000, test_days=100):
     history = []
     for ep in range(epochs):
         w_ic , w_ode, w_data = get_weights(ep)
-        optimizer.zero_grad()
+        optimizer.zero_grad() #reset any previous gradients
        
         # IC loss (at t=0)
         l_ic = ic_loss(model, ICs, T_max, params)
@@ -223,7 +224,7 @@ def train_model(epochs=40000, test_days=100):
        
         history.append(loss.item())
        
-        if ep % 1000 == 0:
+        if ep % 10 == 0:
             with torch.no_grad():
                 out = forward_with_constraints(model, t_full)
                 s_range = f"[{out[:,0].min():.4f}, {out[:,0].max():.4f}]"
@@ -263,7 +264,7 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.ylabel('Loss')
     plt.title('Training History')
     plt.grid(True)
-    plt.savefig("/home/akhi/testdir/training_history.png")
+    plt.savefig("training_history.png")
     plt.close()
    
     # 2. Reported Cases (Train/Test split)
@@ -277,7 +278,7 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.title('PINN vs Observed Data')
     plt.legend()
     plt.grid(True)
-    plt.savefig("/home/akhi/testdir/reported_cases_split.png")
+    plt.savefig("reported_cases_split.png")
     plt.close()
    
     # 3. All Compartments
@@ -341,7 +342,7 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.xlabel('Days')
     plt.ylabel('Beta')
     plt.grid(True)
-    plt.savefig("/home/akhi/testdir/all_plots.png")
+    plt.savefig("all_plots.png")
     plt.close()
 
     # Ir vs beta
@@ -378,7 +379,7 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.fill_between(days, 1, max(R0.max(), 3.5), alpha=0.2, color='red')
     plt.xlabel('Days')
     plt.ylabel('R0 (Reproduction Number)')
-    plt.savefig("/home/akhi/testdir/beta_vs_Ir.png")
+    plt.savefig("beta_vs_Ir.png")
     plt.close()
 
     
