@@ -7,11 +7,12 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.autograd as grad
 import torch.nn.functional as F
+torch.manual_seed(56)
 
 #%%
 #Canada Data
 def get_canada_data():
-    df = pd.read_csv('/Users/srejon/Downloads/cases_can.csv')
+    df = pd.read_csv('/home/akhi/testdir/cases_can.csv')  
     df['date'] = pd.to_datetime(df['date'])
     inc_cases = df['value_daily'].rolling(window=7).mean().dropna()
     return inc_cases
@@ -20,10 +21,10 @@ def get_canada_data():
 #PINN model
 def create_model():
     model = nn.Sequential(
-        nn.Linear(1, 128), nn.Tanh(),
-        nn.Linear(128, 128), nn.Tanh(),
-        nn.Linear(128, 128), nn.Tanh(),
-        nn.Linear(128, 8)
+        nn.Linear(1, 64), nn.Tanh(),
+        nn.Linear(64, 64), nn.Tanh(),
+        nn.Linear(64, 64), nn.Tanh(),
+        nn.Linear(64, 8)
     )
     return model
 
@@ -43,8 +44,6 @@ def forward_with_constraints(model, t):
 
 #%%
 #ODE loss
-# derivatives multiplied by T_max because we normalized t [0,1], because this stabilize the training)
-#  By chain rule: d(state)/dt_normalised = T_max * d(state)/dt_real
 def ode_loss(model, t, params, T_max):
     sigma, gamma_u, gamma_r, p, h, gamma_h, mu = params
     out = forward_with_constraints(model, t)
@@ -57,8 +56,10 @@ def ode_loss(model, t, params, T_max):
     R = out[:, 5]
     D = out[:, 6]
     beta = out[:, 7]
-   
+
+   #creates a tensor of all 1's same shape as S, need this to combine gradients from multiple outputs
     ones = torch.ones_like(S)
+    #create_graph= True, because we need derivative of a derivative otherwise the term would consider as a constant
    
     dSdt = grad.grad(S, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dEdt = grad.grad(E, t, grad_outputs=ones, create_graph=True)[0].squeeze()
@@ -81,26 +82,21 @@ def ode_loss(model, t, params, T_max):
    
     return (r_S**2 + r_E**2 + r_Iu**2 + r_Ir**2 + r_H**2 + r_R**2 + r_D**2).mean()
 
+
+
 #%%
 #Initial condition loss
-#IC LOSS WITH CEIC AT t=0
-# Standard IC loss matches values at t=0.
-# CEIC additionally matches the DERIVATIVE at t=0 to the ODE RHS.
-# This satisfies both position AND slope at the start, preventing early divergence.
 def ic_loss(model, ICs, T_max, params):
     sigma, gamma_u, gamma_r, p, h, gamma_h, mu = params
     S0, E0, Iu0, Ir0, H0, R0, D0 = ICs
-   
+    
     t0 = torch.tensor([[0.0]], dtype=torch.float32, requires_grad=True)
     out = forward_with_constraints(model, t0)
-   
-    # Value loss
-    pred = torch.tensor([out[0,0].detach().item(), out[0,1].detach().item(),
-                         out[0,2].detach().item(), out[0,3].detach().item(),
-                         out[0,4].detach().item(), out[0,5].detach().item(),
-                         out[0,6].detach().item()], dtype=torch.float32)
+    
+    # Value loss - keep gradients!
+    pred = out[0, :7]  # Direct reference, no detach
     target = torch.tensor([S0, E0, Iu0, Ir0, H0, R0, D0], dtype=torch.float32)
-    v_loss = 500* ((pred - target)**2).mean()
+    v_loss =  ((pred - target)**2).mean()
    
     # Derivative loss
     ones = torch.ones(1)
@@ -147,7 +143,6 @@ def ceic_data_loss(model, t_np, Ir_obs_np, params, T_max):
     v_loss = ((Ir - Ir_k)**2).mean()
    
     # Derivative losses
-    #compute the derivative at each point, give equal weight and return the vector of derivatives d/dt
     ones = torch.ones(len(indices))
     dIrdt = grad.grad(Ir, t_k, grad_outputs=ones, create_graph=True)[0].squeeze()
     dEdt = grad.grad(E, t_k, grad_outputs=ones, create_graph=True)[0].squeeze()
@@ -155,7 +150,6 @@ def ceic_data_loss(model, t_np, Ir_obs_np, params, T_max):
     rhs_Ir = T_max * (p * sigma * E - (gamma_r + h) * Ir_k)
    
     Trans = beta * S * (Iu + Ir_k)
-    #E consistency — the beta-identifying constraint
     rhs_E = T_max * (Trans - sigma * E)
    
     d_loss = ((dIrdt - rhs_Ir)**2).mean() + ((dEdt - rhs_E)**2).mean()
@@ -166,8 +160,8 @@ def ceic_data_loss(model, t_np, Ir_obs_np, params, T_max):
 #Train model
 def train_model(epochs=40000, test_days=100):
     N = 38000000
-    params = (1/5.2, 1/14, 1/14, 0.5, 0.05, 1/21, 0.01)
-    ICs = [(N-7)/N, 5/N, 0.0, 2/N, 0.0, 0.0, 0.0]
+    params = (1/5.2, 1/14, 1/14, 0.5, 0.08, 1/21, 0.01)
+    ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0, 0.0, 0.0]
    
     cases = get_canada_data()
     total_days = len(cases)
@@ -176,7 +170,6 @@ def train_model(epochs=40000, test_days=100):
     # Split into train and test
     train_days = total_days - test_days
     train_indices = np.arange(0, train_days)
-    test_indices = np.arange(train_days, total_days)
 
     # Use TOTAL days for T_max
     T_max = float(total_days)
@@ -187,15 +180,26 @@ def train_model(epochs=40000, test_days=100):
    
     # Training time tensor (only training points)
     t_train_np = t_np_full[train_indices]
-    t_train = torch.tensor(t_train_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
     Ir_train = Ir_obs[train_indices]
    
     # Create model
     model = create_model()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    def get_weights(ep):
+    # gradually increase importance of data
+      w_ic = 100 + 0.02 * ep
+      w_ode = 1 + 0.001 * ep
+      w_data = 10 + 0.05 * ep
+
+      return w_ic, w_ode, w_data
+    
+
+    print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'CEIC':>12} {'Total':>12}  S_range              beta_range")
    
     history = []
     for ep in range(epochs):
+        w_ic , w_ode, w_data = get_weights(ep)
         optimizer.zero_grad()
        
         # IC loss (at t=0)
@@ -205,15 +209,15 @@ def train_model(epochs=40000, test_days=100):
         l_ode = ode_loss(model, t_full, params, T_max)
        
         # Data loss - Only on training points
-        #l_data = data_loss(model, t_train_np, Ir_train, params, T_max)
         l_data = ceic_data_loss(model, t_train_np, Ir_train, params, T_max)
        
         # Combined loss - Adjusted weights
-        loss = 3500.0 * l_ic + 1.0 * l_ode + 500.0 * l_data
+        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data
         loss.backward()
-        #gradient clipping, making sure not too big gradient otherwise
-        #gradient will explode. If the norm exceeds 1.0, it scales all gradients down so the norm becomes exactly 1.0
-        #and if norm less thena 1 does nothing
+        
+        # Gradient clipping
+        #calculate L2 norm for all gradients, if its >1 then scale it to norm=1, and if <1 then does nothing
+        #we need this to be safe from exploding gradient
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
        
@@ -251,7 +255,7 @@ def plot_all(model, history, cases, N, t, train_days):
     D = out[:, 6] * N
     beta = out[:, 7]
    
-    # 1. Training History
+   # 1. Training History
     plt.figure(figsize=(10, 4))
     plt.plot(history)
     plt.yscale('log')
@@ -259,7 +263,8 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.ylabel('Loss')
     plt.title('Training History')
     plt.grid(True)
-    plt.show()
+    plt.savefig("/home/akhi/testdir/training_history.png")
+    plt.close()
    
     # 2. Reported Cases (Train/Test split)
     plt.figure(figsize=(12, 5))
@@ -272,7 +277,8 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.title('PINN vs Observed Data')
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.savefig("/home/akhi/testdir/reported_cases_split.png")
+    plt.close()
    
     # 3. All Compartments
     plt.figure(figsize=(14, 8))
@@ -301,6 +307,7 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.subplot(2, 4, 4)
     plt.plot(days, Ir/1e3, 'b-', label='PINN')
     plt.plot(days, cases_np/1e3, 'k--', alpha=0.5, label='Observed')
+
     plt.title(f'Reported (peak: {Ir.max()/1e3:.0f}k)')
     plt.xlabel('Days')
     plt.ylabel('Thousands')
@@ -334,12 +341,49 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.xlabel('Days')
     plt.ylabel('Beta')
     plt.grid(True)
-   
-    plt.tight_layout()
-    plt.show()
-   
-   
-    # 5. Validation Metrics
+    plt.savefig("/home/akhi/testdir/all_plots.png")
+    plt.close()
+
+    # Ir vs beta
+    plt.figure(figsize=(8,5))
+    plt.subplot(1,2,1)
+
+    # Left axis
+    plt.plot(days, cases_np/1e3, 'k-', label='Observed')
+    plt.plot(days, Ir/1e3, 'b-', label='Predicted')
+
+    plt.xlabel('Days')
+    plt.ylabel('Cases (thousands)')
+    plt.grid(True)
+
+    # Right axis
+    ax2 = plt.gca().twinx()
+    ax2.plot(days, beta, 'r-')
+    ax2.set_ylabel('Beta')
+
+   #combined legend
+    plt.legend(['Observed', 'Predicted', 'Beta'], loc='upper left')
+
+    plt.title('Beta vs Cases')
+    
+    #2nd plot
+    plt.subplot(1, 2, 2)
+    # Calculate R0
+    CONSTANT = (0.5/(1/14 + 0.08) + 0.5/(1/14))
+    R0 = beta * CONSTANT
+    plt.plot(days, R0, 'g-', linewidth=2, label='R0(t)')
+    plt.axhline(y=1, color='r', linestyle='--', linewidth=2, label='R0 = 1 (threshold)')
+    # Add shaded regions for interpretation
+    plt.fill_between(days, 0, 1, alpha=0.2, color='green')
+    plt.fill_between(days, 1, max(R0.max(), 3.5), alpha=0.2, color='red')
+    plt.xlabel('Days')
+    plt.ylabel('R0 (Reproduction Number)')
+    plt.savefig("/home/akhi/testdir/beta_vs_Ir.png")
+    plt.close()
+
+    
+    # Validation Metrics
+    #test days starts after the train days
     pred_test = Ir[train_days:]
     true_test = cases_np[train_days:]
    
@@ -360,15 +404,5 @@ def plot_all(model, history, cases, N, t, train_days):
 #%%
 #Run everything
 if __name__ == "__main__":
-    model, history, cases, N, t, train_days = train_model(epochs=2000, test_days=100)
+    model, history, cases, N, t, train_days = train_model(epochs=50000, test_days=100)
     plot_all(model, history, cases, N, t, train_days)
-
-
-
-   
-  
-   
-   
-
-
-
