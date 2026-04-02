@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.autograd as grad
 import torch.nn.functional as F
-torch.manual_seed(56)
+torch.manual_seed(560)
 
 #%%
 #Canada Data
@@ -24,7 +24,7 @@ def create_model():
         nn.Linear(1, 64), nn.Tanh(),
         nn.Linear(64, 64), nn.Tanh(),
         nn.Linear(64, 64), nn.Tanh(),
-        nn.Linear(64, 8)
+        nn.Linear(64, 9)
     )
     return model
 
@@ -40,7 +40,8 @@ def forward_with_constraints(model, t):
     R = F.softplus(raw[:, 5:6])
     D = F.softplus(raw[:, 6:7])
     beta = F.softplus(raw[:, 7:8]) + 0.01
-    return torch.cat([S, E, Iu, Ir, H, R, D, beta], dim=1)
+    Cr = F.softplus(raw[:, 8:9])
+    return torch.cat([S, E, Iu, Ir, H, R, D, beta, Cr], dim=1)
 
 #%%
 #ODE loss
@@ -56,6 +57,7 @@ def ode_loss(model, t, params, T_max):
     R = out[:, 5]
     D = out[:, 6]
     beta = out[:, 7]
+    Cr = out[:, 8]
 
    #creates a tensor of all 1's same shape as S, need this to combine gradients from multiple outputs
     ones = torch.ones_like(S)
@@ -68,6 +70,7 @@ def ode_loss(model, t, params, T_max):
     dHdt = grad.grad(H, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dRdt = grad.grad(R, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dDdt = grad.grad(D, t, grad_outputs=ones, create_graph=True)[0].squeeze()
+    dCrdt = grad.grad(Cr, t, grad_outputs=ones, create_graph=True)[0].squeeze()
    
     
     Trans = beta * S * (Iu + Ir)
@@ -79,22 +82,23 @@ def ode_loss(model, t, params, T_max):
     r_H = dHdt - T_max * (h * Ir - (gamma_h + mu) * H)
     r_R = dRdt - T_max * (gamma_u*Iu + gamma_r*Ir + gamma_h*H)
     r_D = dDdt - T_max * (mu * H)
+    r_Cr = dCrdt - T_max * (p * sigma * E)
    
-    return (r_S**2 + r_E**2 + r_Iu**2 + r_Ir**2 + r_H**2 + r_R**2 + r_D**2).mean()
+    return (r_S**2 + r_E**2 + r_Iu**2 + r_Ir**2 + r_H**2 + r_R**2 + r_D**2 + r_Cr**2).mean()
 
 
 #%%
 #Initial condition loss
 def ic_loss(model, ICs, T_max, params):
     sigma, gamma_u, gamma_r, p, h, gamma_h, mu = params
-    S0, E0, Iu0, Ir0, H0, R0, D0 = ICs
+    S0, E0, Iu0, Ir0, H0, R0, D0, Cr0 = ICs
     
     t0 = torch.tensor([[0.0]], dtype=torch.float32, requires_grad=True)
     out = forward_with_constraints(model, t0)
     
     # Value loss - keep gradients!
-    pred = out[0, :7]  # Direct reference, no detach
-    target = torch.tensor([S0, E0, Iu0, Ir0, H0, R0, D0], dtype=torch.float32)
+    pred = out[0,[0,1,2,3,4,5,6,8]]  # S, E, Iu, Ir, H, R, D, Cr at t =0
+    target = torch.tensor([S0, E0, Iu0, Ir0, H0, R0, D0, Cr0], dtype=torch.float32)
     v_loss =  ((pred - target)**2).mean()
    
     # Derivative loss
@@ -106,6 +110,7 @@ def ic_loss(model, ICs, T_max, params):
     dHdt = grad.grad(out[:,4], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
     dRdt = grad.grad(out[:,5], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
     dDdt = grad.grad(out[:,6], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
+    dCrdt = grad.grad(out[:,8], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
    
     Trans = out[0,7] * out[0,0] * (out[0,2] + out[0,3])
    
@@ -116,8 +121,9 @@ def ic_loss(model, ICs, T_max, params):
     r_H = dHdt - T_max * (h * out[0,3] - (gamma_h + mu) * out[0,4])
     r_R = dRdt - T_max * (gamma_u*out[0,2] + gamma_r*out[0,3] + gamma_h*out[0,4])
     r_D = dDdt - T_max * (mu * out[0,4])
+    r_Cr = dCrdt - T_max * (p * sigma * out[0,1])
    
-    d_loss = (r_S**2 + r_E**2 + r_Iu**2 + r_Ir**2 + r_H**2 + r_R**2 + r_D**2).mean()
+    d_loss = (r_S**2 + r_E**2 + r_Iu**2 + r_Ir**2 + r_H**2 + r_R**2 + r_D**2 + r_Cr**2).mean()
    
     return v_loss + d_loss
 
@@ -129,31 +135,25 @@ def ceic_data_loss(model, t_np, Ir_obs_np, params, T_max):
     # Use every 7th point(not average)
     indices = np.arange(0, len(t_np), 7)
     t_k = torch.tensor(t_np[indices].reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-    Ir_k = torch.tensor(Ir_obs_np[indices], dtype=torch.float32)
+    Ir_obs_k = torch.tensor(Ir_obs_np[indices], dtype=torch.float32)
+    cum_obs= torch.tensor(np.cumsum(Ir_obs_np)[indices], dtype=torch.float32)
+    Ir_obs_max  = float(Ir_obs_np.max())
    
     out = forward_with_constraints(model, t_k)
-    S = out[:, 0]
-    E = out[:, 1]
-    Iu = out[:, 2]
     Ir = out[:, 3]
-    beta = out[:, 7]
-   
-    # Value loss
-    v_loss = ((Ir - Ir_k)**2).mean()
-   
-    # Derivative losses
-    ones = torch.ones(len(indices))
-    dIrdt = grad.grad(Ir, t_k, grad_outputs=ones, create_graph=True)[0].squeeze()
-    dEdt = grad.grad(E, t_k, grad_outputs=ones, create_graph=True)[0].squeeze()
-   
-    rhs_Ir = T_max * (p * sigma * E - (gamma_r + h) * Ir_k)
-   
-    Trans = beta * S * (Iu + Ir_k)
-    rhs_E = T_max * (Trans - sigma * E)
-   
-    d_loss = ((dIrdt - rhs_Ir)**2).mean() + ((dEdt - rhs_E)**2).mean()
-   
-    return v_loss + d_loss
+    Cr = out[:, 8]
+
+    # Cumulative value loss
+    v_loss = ((Cr - cum_obs) ** 2).mean()
+
+    # Shape loss
+    # Trying to match the temporal pattern of the data, want to know the epidemic curve shape, and temporal dynamics
+    #cumulative loss does not know where the peaks and valleys are, so we need this to guide the model to learn the right shape, and not just the right total number of cases
+    Ir_norm = Ir / (Ir_obs_max)
+    Ir_obs_norm = Ir_obs_k / (Ir_obs_max)
+    shape_loss  = ((Ir_norm - Ir_obs_norm) ** 2).mean()
+
+    return v_loss , shape_loss
 
 #%%
 #Train model
@@ -161,8 +161,8 @@ def train_model(epochs=40000, test_days=100):
     
     # general parameters used in the model
     N = 38000000
-    params = (1/5.2, 1/14, 1/14, 0.5, 0.08, 1/21, 0.01)
-    ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0, 0.0, 0.0] # no covid cases at the start, seed with 1 or 2 or 10
+    params = (1/5.2, 1/14, 1/14, 0.5, 0.08, 1/21, 0.009) # sigma, gamma_u, gamma_r, p, h, gamma_h, mu
+    ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0, 0.0, 0.0, 0.0] # no covid cases at the start, seed with 1 or 2 or 10
    
     cases = get_canada_data()
     total_days = len(cases)
@@ -187,20 +187,21 @@ def train_model(epochs=40000, test_days=100):
     model = create_model()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
+    #weights for different loss compartments
     def get_weights(ep):
     # gradually increase importance of data
       w_ic = 100 + 0.02 * ep
       w_ode = 1 + 0.001 * ep
       w_data = 10 + 0.05 * ep
+      w_shape = 1 + 0.001 * ep
 
-      return w_ic, w_ode, w_data
-    
+      return w_ic, w_ode, w_data, w_shape
 
-    print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'CEIC':>12} {'Total':>12}  S_range              beta_range")
+    print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'CEIC':>12} {'Total':>12}  S_range       beta_range")
    
     history = []
     for ep in range(epochs):
-        w_ic , w_ode, w_data = get_weights(ep)
+        w_ic , w_ode, w_data, w_shape = get_weights(ep)
         optimizer.zero_grad() #reset any previous gradients
        
         # IC loss (at t=0)
@@ -210,10 +211,10 @@ def train_model(epochs=40000, test_days=100):
         l_ode = ode_loss(model, t_full, params, T_max)
        
         # Data loss - Only on training points
-        l_data = ceic_data_loss(model, t_train_np, Ir_train, params, T_max)
+        l_data , l_shape= ceic_data_loss(model, t_train_np, Ir_train, params, T_max)
        
         # Combined loss - Adjusted weights
-        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data
+        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data + w_shape * l_shape
         loss.backward()
         
         # Gradient clipping
@@ -224,7 +225,7 @@ def train_model(epochs=40000, test_days=100):
        
         history.append(loss.item())
        
-        if ep % 10 == 0:
+        if ep % 1000 == 0:
             with torch.no_grad():
                 out = forward_with_constraints(model, t_full)
                 s_range = f"[{out[:,0].min():.4f}, {out[:,0].max():.4f}]"
@@ -242,6 +243,7 @@ def plot_all(model, history, cases, N, t, train_days):
    
     # Convert cases to numpy
     cases_np = np.array(cases)
+    Ic_obs   = np.cumsum(cases_np)
    
     # Model prediction
     with torch.no_grad():
@@ -255,6 +257,7 @@ def plot_all(model, history, cases, N, t, train_days):
     R = out[:, 5] * N
     D = out[:, 6] * N
     beta = out[:, 7]
+    Cr = out[:, 8] * N
    
    # 1. Training History
     plt.figure(figsize=(10, 4))
@@ -265,6 +268,20 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.title('Training History')
     plt.grid(True)
     plt.savefig("training_history.png")
+    plt.close()
+
+    # 2. Cumulative cases
+    plt.figure(figsize=(12, 5))
+    plt.plot(days, Cr, 'b-', label='PINN Prediction (Cr)', linewidth=2)
+    plt.plot(days[:train_days], Ic_obs[:train_days], 'g.', label='Training Data', markersize=3)
+    plt.plot(days[train_days:], Ic_obs[train_days:], 'r.', label='Test Data', markersize=3)
+    plt.axvline(train_days, color='k', linestyle='--', alpha=0.5, label='Train/Test Split')
+    plt.xlabel('Days')
+    plt.ylabel('Cumulative Reported Cases')
+    plt.title('PINN Cr vs Cumulative Observed Data')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("reported_cumulative_cases_split.png")
     plt.close()
    
     # 2. Reported Cases (Train/Test split)
