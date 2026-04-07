@@ -1,0 +1,15 @@
+name: testenv
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - matplotlib
+  - cpuonly
+  - intel-openmp
+  - mkl
+  - mkl-service
+  - ipykernel
+  - scipy
+prefix: /home/akhi/miniconda3/envs/testenv
