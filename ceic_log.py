@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.autograd as grad
 import torch.nn.functional as F
-torch.manual_seed(560)
+#torch.manual_seed(56)
 
 #%%
 #Canada Data
@@ -129,43 +129,39 @@ def ic_loss(model, ICs, T_max, params):
 
 #%%
 #CEIC data loss
-def ceic_data_loss(model, t_np, Ir_obs_np, params, T_max):
-    sigma, gamma_u, gamma_r, p, h, gamma_h, mu = params
+def ceic_data_loss(model, t_np, I_obs):
    
-    # Use every 7th point(not average)
     indices = np.arange(0, len(t_np), 7)
+    
     t_k = torch.tensor(t_np[indices].reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-    Ir_obs_k = torch.tensor(Ir_obs_np[indices], dtype=torch.float32)
-    cum_obs= torch.tensor(np.cumsum(Ir_obs_np)[indices], dtype=torch.float32)
-    Ir_obs_max  = float(Ir_obs_np.max())
+    cum_obs = torch.tensor(np.cumsum(I_obs)[indices], dtype=torch.float32)
    
     out = forward_with_constraints(model, t_k)
-    Ir = out[:, 3]
     Cr = out[:, 8]
-
-    # Cumulative value loss
+    
+    # v loss (cumulative)
     v_loss = ((Cr - cum_obs) ** 2).mean()
-
-    # Shape loss
-    # Trying to match the temporal pattern of the data, want to know the epidemic curve shape, and temporal dynamics
-    #cumulative loss does not know where the peaks and valleys are, so we need this to guide the model to learn the right shape, and not just the right total number of cases
-    Ir_norm = Ir / (Ir_obs_max)
-    Ir_obs_norm = Ir_obs_k / (Ir_obs_max)
-    shape_loss  = ((Ir_norm - Ir_obs_norm) ** 2).mean()
-
-    return v_loss , shape_loss
+    
+    return v_loss
 
 #%%
+#Time to train the model
+def time_to_train():
+    cases = get_canada_data()
+    total_days = len(cases)
+    t_np_full = np.linspace(0, 1, total_days, dtype=np.float32)
+    t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+    return t_np_full, t_full, total_days, cases
+#%%
 #Train model
-def train_model(epochs=40000, test_days=100):
+def train_model(epochs=40000, test_days=100, save=False):
     
     # general parameters used in the model
     N = 38000000
-    params = (1/5.2, 1/14, 1/14, 0.5, 0.08, 1/21, 0.009) # sigma, gamma_u, gamma_r, p, h, gamma_h, mu
+    params = (1/5.2, 1/10, 1/14, 0.5, 0.08, 1/14, 0.002) # sigma, gamma_u, gamma_r, p, h, gamma_h, mu
     ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0, 0.0, 0.0, 0.0] # no covid cases at the start, seed with 1 or 2 or 10
    
-    cases = get_canada_data()
-    total_days = len(cases)
+    t_np_full, t_full, total_days, cases = time_to_train()
     Ir_obs = cases.values / N # convert cases to a proportion
     
     # Split into train and test
@@ -174,13 +170,10 @@ def train_model(epochs=40000, test_days=100):
 
     # Use TOTAL days for T_max
     T_max = float(total_days)
-   
-    # Full time tensor for evaluation
-    t_np_full = np.linspace(0, 1, total_days, dtype=np.float32)
-    t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
     
     # Training time tensor (only training points)
     t_train_np = t_np_full[train_indices] # training time
+    t_train_tensor = torch.tensor(t_train_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True) 
     Ir_train = Ir_obs[train_indices]      # and cases at those time points
    
     # Create model
@@ -193,28 +186,27 @@ def train_model(epochs=40000, test_days=100):
       w_ic = 100 + 0.02 * ep
       w_ode = 1 + 0.001 * ep
       w_data = 10 + 0.05 * ep
-      w_shape = 1 + 0.001 * ep
-
-      return w_ic, w_ode, w_data, w_shape
+    
+      return w_ic, w_ode, w_data
 
     print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'CEIC':>12} {'Total':>12}  S_range       beta_range")
    
     history = []
     for ep in range(epochs):
-        w_ic , w_ode, w_data, w_shape = get_weights(ep)
+        w_ic , w_ode, w_data = get_weights(ep)
         optimizer.zero_grad() #reset any previous gradients
        
         # IC loss (at t=0)
         l_ic = ic_loss(model, ICs, T_max, params)
        
         # ODE loss - Using FULL time tensor
-        l_ode = ode_loss(model, t_full, params, T_max)
+        l_ode = ode_loss(model, t_train_tensor, params, T_max)
        
         # Data loss - Only on training points
-        l_data , l_shape= ceic_data_loss(model, t_train_np, Ir_train, params, T_max)
+        l_data = ceic_data_loss(model, t_train_np, Ir_train)
        
         # Combined loss - Adjusted weights
-        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data + w_shape * l_shape
+        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data 
         loss.backward()
         
         # Gradient clipping
@@ -223,7 +215,9 @@ def train_model(epochs=40000, test_days=100):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
        
-        history.append(loss.item())
+        history.append(loss.item()) #loss is a tensor with attached graph, it remembers how it was computed,
+        #takes lot of memory, we need to convert it to a scalar value so 
+        # we detach it from the graph and then convert to a python number using item()
        
         if ep % 1000 == 0:
             with torch.no_grad():
@@ -232,13 +226,14 @@ def train_model(epochs=40000, test_days=100):
                 b_range = f"[{out[:,7].min():.3f}, {out[:,7].max():.3f}]"
             print(f"{ep:} {l_ic.item():} {l_ode.item():} {l_data.item():} "
                   f"{loss.item():}  {s_range}  {b_range}")
-   
-    return model, history, cases, N, t_full, train_days
+    if save: 
+        torch.save(model.state_dict(), "pinn_model.pth") 
+    return model, history, train_days
 
 #%%
 #Plot
-def plot_all(model, history, cases, N, t, train_days):
-    total_days = len(cases)
+def plot_all(model, train_days,t_full):
+    t_np_full, t_full, total_days, cases = time_to_train()
     days = np.arange(total_days)
    
     # Convert cases to numpy
@@ -247,7 +242,7 @@ def plot_all(model, history, cases, N, t, train_days):
    
     # Model prediction
     with torch.no_grad():
-        out = forward_with_constraints(model, t).numpy()
+        out = forward_with_constraints(model, t_full).numpy()
    
     S = out[:, 0] * N
     E = out[:, 1] * N
@@ -259,8 +254,8 @@ def plot_all(model, history, cases, N, t, train_days):
     beta = out[:, 7]
     Cr = out[:, 8] * N
    
-   # 1. Training History
-    plt.figure(figsize=(10, 4))
+  # 1. Training History
+    """plt.figure(figsize=(10, 4))
     plt.plot(history)
     plt.yscale('log')
     plt.xlabel('Epoch')
@@ -268,7 +263,7 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.title('Training History')
     plt.grid(True)
     plt.savefig("training_history.png")
-    plt.close()
+    plt.close()"""
 
     # 2. Cumulative cases
     plt.figure(figsize=(12, 5))
@@ -323,8 +318,8 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.grid(True)
    
     plt.subplot(2, 4, 4)
-    plt.plot(days, Ir/1e3, 'b-', label='PINN')
-    plt.plot(days, cases_np/1e3, 'k--', alpha=0.5, label='Observed')
+    plt.plot(days, Ir/1e3, 'b-', label='PINN') #PREV
+    plt.plot(days, cases_np/1e3, 'k--', alpha=0.5, label='Observed') #INCIDENCE
 
     plt.title(f'Reported (peak: {Ir.max()/1e3:.0f}k)')
     plt.xlabel('Days')
@@ -364,8 +359,7 @@ def plot_all(model, history, cases, N, t, train_days):
 
     # Ir vs beta
     plt.figure(figsize=(8,5))
-    plt.subplot(1,2,1)
-
+ 
     # Left axis
     plt.plot(days, cases_np/1e3, 'k-', label='Observed')
     plt.plot(days, Ir/1e3, 'b-', label='Predicted')
@@ -383,23 +377,9 @@ def plot_all(model, history, cases, N, t, train_days):
     plt.legend(['Observed', 'Predicted', 'Beta'], loc='upper left')
 
     plt.title('Beta vs Cases')
-    
-    #2nd plot
-    plt.subplot(1, 2, 2)
-    # Calculate R0
-    CONSTANT = (0.5/(1/14 + 0.08) + 0.5/(1/14))
-    R0 = beta * CONSTANT
-    plt.plot(days, R0, 'g-', linewidth=2, label='R0(t)')
-    plt.axhline(y=1, color='r', linestyle='--', linewidth=2, label='R0 = 1 (threshold)')
-    # Add shaded regions for interpretation
-    plt.fill_between(days, 0, 1, alpha=0.2, color='green')
-    plt.fill_between(days, 1, max(R0.max(), 3.5), alpha=0.2, color='red')
-    plt.xlabel('Days')
-    plt.ylabel('R0 (Reproduction Number)')
-    plt.savefig("beta_vs_Ir.png")
+    plt.savefig("beta_vs_cases.png")
     plt.close()
 
-    
     # Validation Metrics
     #test days starts after the train days
     pred_test = Ir[train_days:]
@@ -419,8 +399,44 @@ def plot_all(model, history, cases, N, t, train_days):
     print(f"Total dead:    {D[-1]/1e3:.1f}k")
     print(f"Total recovered: {R[-1]/1e6:.3f}M")
 
+def load_model(path):
+    model = create_model()
+    model.load_state_dict(torch.load(path))
+    return model
+
 #%%
 #Run everything
 if __name__ == "__main__":
-    model, history, cases, N, t, train_days = train_model(epochs=50000, test_days=100)
-    plot_all(model, history, cases, N, t, train_days)
+    
+    #train_model(epochs=70000, test_days=100, save=True)
+    # run_training(save=True)
+    model = load_model("pinn_model.pth")
+    t_np_full, t_full, total_days, cases = time_to_train()
+
+    with torch.no_grad():
+        out = forward_with_constraints(model, t_full).numpy()
+        N = 38000000
+    
+    print(out.shape)
+    print(out[:, 8].shape)
+    plt.plot(out[:,8]*N )
+    plt.plot(np.cumsum(cases))
+    plt.savefig("cumulative_cases.png")
+    plt.close()
+
+    plt.plot(np.diff(out[:,8]*N ))
+    plt.plot(cases)
+    plt.savefig("daily_cases.png")
+    plt.close()
+
+    print(np.diff(out[:, 8] * N).max())
+    plt.plot(out[:, 6]*N)
+    plt.savefig("deadd_cases.png")
+    plt.close()
+
+    plot_all(model, total_days-100, t_full)
+
+    print(np.where(cases > 20000))
+    
+
+
