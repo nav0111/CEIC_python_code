@@ -151,7 +151,7 @@ def ic_loss(model, ICs, T_max, params):
    
     r_S = dSdt +  T_max * Trans
     r_E = dEdt -  T_max * (Trans - sigma * out[0,1])
-    r_I = dIdt - T_max * (sigma * out[0,1] + gamma * out[0,2])
+    r_I = dIdt - T_max * (sigma * out[0,1] - gamma * out[0,2])
     r_R = dRdt - T_max * (gamma * out[0,2])
     r_C_inci = dC_incidt - T_max * (sigma * out[0,1])
    

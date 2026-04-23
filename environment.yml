@@ -1,11 +1,15 @@
 name: pinns
 channels:
   - defaults
+  - pytorch
 dependencies:
   - python=3.10
   - numpy
   - pandas
   - matplotlib
+  - pytorch
+  - torchvision
+  - torchaudio
   - cpuonly
   - intel-openmp
   - mkl
