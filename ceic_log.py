@@ -9,6 +9,8 @@ import torch.optim as optim
 import torch.autograd as grad
 import torch.nn.functional as F
 from scipy.stats import gamma as gamma_dist
+from scipy.integrate import solve_ivp
+from scipy.interpolate import interp1d
 
 #%%
 #Canada Data
@@ -151,7 +153,7 @@ def ic_loss(model, ICs, T_max, params):
    
     r_S = dSdt +  T_max * Trans
     r_E = dEdt -  T_max * (Trans - sigma * out[0,1])
-    r_I = dIdt - T_max * (sigma * out[0,1] + gamma * out[0,2])
+    r_I = dIdt - T_max * (sigma * out[0,1] - gamma * out[0,2])
     r_R = dRdt - T_max * (gamma * out[0,2])
     r_C_inci = dC_incidt - T_max * (sigma * out[0,1])
    
@@ -375,39 +377,8 @@ def plot_all(model, train_days,t_full):
     print(f"Beta range:    [{beta.min():.3f}, {beta.max():.3f}]")
     print(f"Total recovered: {R[-1]/1e6:.3f}M")
 
-def load_model(path):
-    model = create_model()
-    model.load_state_dict(torch.load(path))
-    return model
 
 #%%
-#Run everything
-if __name__ == "__main__":
-    
-    #train_model(epochs=50000, test_days=100, save=True)
-    # run_training(save=True)
-    model = load_model("pinn_model.pth")
-    t_np_full, t_full, total_days, cases = time_to_train()
-
-    with torch.no_grad():
-        out = forward_with_constraints(model, t_full).numpy()
-        N = 38000000
-    
-    print(out.shape)
-    print(out[:, 4].shape)
-    plt.plot(out[:,4]*N )
-    plt.plot(np.cumsum(cases))
-    plt.savefig("cumulative_cases.png")
-    plt.close()
-
-    plt.plot(np.diff(out[:,4]*N ))
-    plt.plot(cases)
-    plt.savefig("daily_cases.png")
-    plt.close()
-
-    plot_all(model, train_days=total_days-100, t_full=t_full)
-    
-
 def R_eff(out, params):
     sigma, gamma = params
     S    = out[:, 0]   # proportion, no need to multiply by N
@@ -469,66 +440,78 @@ def estimate_R_t(cases, mean_si=5.2, sd_si=1.5, window=3, a0=1, b0=2):
     return Rt_mean, Rt_lower, Rt_upper
 
 #%%
-#Plot beta and R_t with variant periods shaded, using both the PINN-derived R_t 
-# and the Bayesian R_t estimates from EpiEstim for comparison. 
-# This will allow us to see how the transmission rate and effective reproduction number 
-# evolved over time, and how they correspond to the different variant periods in Canada.
-def plot_beta_R_t(out, cases, params, variants, data_start_date):
+#comparison of the PINN-derived R_t and the EpiEstim Bayesian R_t estimates,
+#  with variant periods shaded, to see how the transmission dynamics evolved over time 
+# and how they correspond to the different variant periods in Canada.
+def plot_R_t_comparison(out, cases, params, variants, data_start_date):
     cases_np = np.array(cases)
     days = np.arange(len(cases_np))
     
-    beta = out[:, 5]
     Rt_pinn = R_eff(out, params)
     Rt_mean, Rt_lower, Rt_upper = estimate_R_t(cases_np)
 
-    # Correct day offset using actual data start date
+    # using the same date_to_day function to convert variant period dates to day indices for plotting
     def date_to_day(dt):
         return (dt - data_start_date).days
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    plt.figure(figsize=(14, 7))
     variant_colors = ['purple', 'orange', 'green', 'brown']
-
-    # Beta panel
-    axes[0].plot(days, beta, color='blue', linewidth=2)
-    axes[0].set_ylabel('β(t)')
-    axes[0].set_title('PINN-Learned Transmission Rate β(t)')
-    axes[0].grid(True)
-
-    # R_t panel
-    valid = ~np.isnan(Rt_lower) & ~np.isnan(Rt_upper)
-    axes[1].plot(days, Rt_pinn,  color='orange', linewidth=2, label='R_t (PINN)')
-    axes[1].plot(days[valid], Rt_mean[valid],  color='green',  linewidth=2, label='R_t (Bayesian)')
-
-    # Confidence interval shading for Bayesian R_t that handles NaNs
-    axes[1].fill_between(days[valid], Rt_lower[valid], Rt_upper[valid], color='grey', alpha=0.3, label='95% CI (Bayesian)')
-    axes[1].axhline(1.0, color='red', linestyle='--', linewidth=1.5, label='R_t = 1')
-    axes[1].set_ylabel('R_t')
-    axes[1].set_title('Effective Reproduction Number with Variant Periods')
-    axes[1].set_ylim(0, 5)
-    axes[1].grid(True)
-
-    #lower limit and upper limit of x-axis based on the data
-    axes[1].set_xlim(0, len(cases_np))
-
-
-    # Shade variants on both panels
+    plt.plot(days, Rt_pinn, color='orange', linewidth=2, label='R_t (PINN)')
+    plt.plot(days, Rt_mean, color='green', linewidth=2, label='R_t (Bayesian)')
+    plt.fill_between(days, Rt_lower, Rt_upper, color='grey', alpha=0.3, label='95% CI (Bayesian)')
+    plt.axhline(1.0, color='red', linestyle='--', linewidth=1.5, label='R_t = 1')
+    plt.xlabel('Days from data start')
+    plt.ylabel('R_t')
+    plt.title('Effective Reproduction Number with Variant Periods')
+    plt.ylim(0, 5)
+    plt.grid(True)
+    # Shade variant periods
     for (variant, (start, end)), col in zip(variants.items(), variant_colors):
         s_day = date_to_day(start)
         e_day = date_to_day(end)
-
-        for ax in axes:
-            ax.axvspan(s_day, e_day, alpha=0.15, color=col, label=variant)
-
-    axes[1].legend(loc='upper right')
-    plt.xlabel('Days from data start')
+        plt.axvspan(s_day, e_day, alpha=0.15, color=col, label=variant)
+    plt.legend(loc='upper right')
     plt.tight_layout()
-    plt.savefig("beta_Rt_variants.png")
+    plt.savefig("R_t_comparison.png")
     plt.close()
+
+#%%
+def load_model(path):
+    model = create_model()
+    model.load_state_dict(torch.load(path))
+    return model
+
+#%%
+#Run everything
+if __name__ == "__main__":
+    
+    #train_model(epochs=50000, test_days=100, save=True)
+    # run_training(save=True)
+    model = load_model("pinn_model.pth")
+    t_np_full, t_full, total_days, cases = time_to_train()
+
+    with torch.no_grad():
+        out = forward_with_constraints(model, t_full).numpy()
+        N = 38000000
+    
+    print(out.shape)
+    print(out[:, 4].shape)
+    plt.plot(out[:,4]*N )
+    plt.plot(np.cumsum(cases))
+    plt.savefig("cumulative_cases.png")
+    plt.close()
+
+    plt.plot(np.diff(out[:,4]*N ))
+    plt.plot(cases)
+    plt.savefig("daily_cases.png")
+    plt.close()
+
+    plot_all(model, train_days=total_days-100, t_full=t_full)
 
 #parameters
 params =  get_parama(total_days)
+#plotting
+plot_R_t_comparison(out, cases, params, CANADA_VARIANTS, data_start_date=datetime.datetime(2020, 1, 23))
 
-plot_beta_R_t(out, cases, params, CANADA_VARIANTS, data_start_date=datetime.datetime(2020, 1, 21)) 
 #print valid R_t range during each variant period
 for variant, (start, end) in CANADA_VARIANTS.items():
     s_day = (start - datetime.datetime(2020, 1, 23)).days
@@ -543,4 +526,148 @@ for variant, (start, end) in CANADA_VARIANTS.items():
 
 
 Rt_mean, Rt_lower, Rt_upper = estimate_R_t(cases, mean_si=5.2, sd_si=1.5, window=3, a0=1.0, b0=5.0)
+
+#%%
+#soleve the ODE with the learned beta and compare to the PINN output
+def solve_ode_with_learned_beta(model, t_np, params):
+    total_days = len(t_np)
+    T_max = float(total_days)
+    t_tensor = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+    with torch.no_grad():
+        out = forward_with_constraints(model, t_tensor).numpy()
+    
+    beta = out[:, 5]
+    sigma_array, gamma_array = params
+    
+    # create continuous interpolating functions for beta, sigma, and gamma to use in the ODE solver
+    # interpolation is used to estimate the unknown parameters (beta, sigma, gamma) 
+    # at any continuous time point during the ODE integration,
+    # based on the discrete values learned by the PINN at the training time points.
+
+    #interp1d creates a function that can be evaluated at any point in the range of t_np, 
+    # and it will return the corresponding beta value based on linear interpolation 
+    # of the discrete beta values from the PINN output. 
+    # The same is done for sigma and gamma using their respective arrays.
+
+    #interp1d(x, y, kind='linear', fill_value='extrapolate'), x is the array of time points 
+    # (t_np) where beta is known from the PINN output, y is the array of beta values 
+    # at those time points, kind='linear' specifies linear interpolation, and 
+    # fill_value='extrapolate' allows the function to extrapolate beyond the range of t_np 
+    # if needed during ODE integration.
+    beta_interp = interp1d(t_np, beta, kind='linear', fill_value='extrapolate')
+    sigma_interp = interp1d(np.arange(len(sigma_array)), sigma_array, kind='linear', fill_value='extrapolate')
+    gamma_interp = interp1d(np.arange(len(gamma_array)), gamma_array, kind='linear', fill_value='extrapolate')
+    
+    def seir_ode(t, y):
+        S, E, I, R = y
+        # Get parameter values at continuous time t
+        beta_t = beta_interp(t)
+        sigma_t = sigma_interp(t * total_days)  # Convert from [0,1] to [0,total_days]
+        gamma_t = gamma_interp(t * total_days)
+        
+        dSdt = T_max * (-beta_t * S * I)
+        dEdt = T_max * (beta_t * S * I - sigma_t * E)
+        dIdt = T_max * (sigma_t * E - gamma_t * I)
+        dRdt = T_max * (gamma_t * I)
+        
+        return [dSdt, dEdt, dIdt, dRdt]
+    
+    # Initial conditions from the PINN at t=0
+    S0, E0, I0, R0 = out[0, :4]
+    #solve_ivp integrates the SEIR ODE system over the time span defined by t_np, 
+    # starting from the initial conditions (S0, E0, I0, R0) and using the interpolated 
+    # beta, sigma, and gamma functions to compute the derivatives at each time step.
+    sol = solve_ivp(fun=seir_ode, t_span=[0, 1], 
+                    y0=[S0, E0, I0, R0], t_eval=t_np, 
+                    method='RK45')
+    
+    return sol, out
+#%%
+def plot_ode_comparison(sol, out, t_np, N):
+    S_ode = sol.y[0] * N
+    E_ode = sol.y[1] * N
+    I_ode = sol.y[2] * N
+    R_ode = sol.y[3] * N
+
+    plt.figure(figsize=(14, 8))
+    plt.subplot(2, 2, 1)
+    plt.plot(t_np, out[:, 0] * N, 'b-', label='PINN S')
+    plt.plot(t_np, S_ode, 'r--', label='ODE S')
+    plt.xlabel('Time (normalized)')
+    plt.ylabel('Susceptible Individuals')
+    plt.title('Susceptible Population')
+    plt.legend()
+    plt.grid(True)
+
+    plt.subplot(2, 2, 2)
+    plt.plot(t_np, out[:, 1] * N, 'b-', label='PINN E')
+    plt.plot(t_np, E_ode, 'r--', label='ODE E')
+    plt.xlabel('Time (normalized)')
+    plt.ylabel('Exposed Individuals')
+    plt.title('Exposed Population')
+    plt.legend()
+    plt.grid(True)
+
+    plt.subplot(2, 2, 3)
+    plt.plot(t_np, out[:, 2] * N, 'b-', label='PINN I')
+    plt.plot(t_np, I_ode, 'r--', label='ODE I')
+    plt.xlabel('Time (normalized)')
+    plt.ylabel('Infectious Individuals')
+    plt.title('Infectious Population')
+    plt.legend()
+    plt.grid(True)
+
+    plt.subplot(2, 2, 4)
+    plt.plot(t_np, out[:, 3] * N, 'b-', label='PINN R')
+    plt.plot(t_np, R_ode, 'r--', label='ODE R')
+    plt.xlabel('Time (normalized)')
+    plt.ylabel('Recovered Individuals')
+    plt.title('Recovered Population')
+    plt.legend()
+    plt.grid(True)
+
+    plt.savefig("ode_comparison.png")
+    plt.close()
+#%%
+
+#plot the ODE solution with the learned beta and compare to the PINN output
+sol, out = solve_ode_with_learned_beta(model, t_np_full, params)
+plot_ode_comparison(sol, out, t_np_full, N)
+
+#%%
+#EpiNow2 for generating incidence data using the PINN R_t estimates, 
+# and comparing to the observed incidence data.
+#Export PINN R_t estimates to CSV for EpiNow2
+#scp akhi@142.3.216.79:/home/akhi/CEIC_python_code/pinn_R_t.csv /Users/srejon/pinn_R_t.csv
+#bring the results back from local
+#scp /Users/srejon/simulation_results.csv akhi@142.3.216.79:/home/akhi/CEIC_python_code/
+
+def export_R_t_for_epinow2(out, params, t_np, filename = 'pinn_R_t.csv'):
+    Rt_pinn = R_eff(out, params)
+    df = pd.DataFrame({'time': t_np, 'R_t': Rt_pinn})
+    df.to_csv(filename, index=False)
+
+
+export_R_t_for_epinow2(out, params, t_np_full, filename='pinn_R_t.csv')
+
+#plot the PINN R_t estimates against the actual incidence data and 
+# the simulated incidence data generated by EpiNow2 using the PINN R_t estimates, 
+# to see how well the PINN-derived R_t captures the transmission dynamics 
+# and how it compares to the observed data and the EpiNow2 simulations.
+
+# Load EpiNow2 simulated incidence data
+simulated_data = pd.read_csv('simulation_results.csv')
+
+plt.figure(figsize=(12, 6))
+plt.plot( cases, 'o', label='Observed Incidence')
+plt.plot( np.diff(out[:, 4]*N), 'b-', label='PINN Predicted Incidence')
+#plt.plot( simulated_data['value'], 'r--', label='EpiNow2 Simulated Incidence')
+
+plt.xlabel('Time (normalized)')
+plt.ylabel('Incidence')
+plt.title('Incidence Comparison')
+plt.legend()
+plt.grid(True)
+plt.savefig("incidence_comparison.png")
+plt.close()
 
