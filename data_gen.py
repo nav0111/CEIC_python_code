@@ -33,21 +33,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
-def seir_model(t, y, beta_func, sigma, gamma):
-    S, E, I, R , Cu_inci = y
+rng = np.random.default_rng(seed=627)
+
+def seir_model(t, y, beta_func, sigma, gamma, omega = 0.0):
+    S, E, I, R, C = y
     N = S + E + I + R
     beta = beta_func(t)
-    dSdt = -beta * S * I / N
+    dSdt = -beta * S * I / N + omega * R
     dEdt = beta * S * I / N - sigma * E
     dIdt = sigma * E - gamma * I
-    dRdt = gamma * I
-    dCu_incidence_dt = sigma * E  # Incidence is the rate of new infections
-    return [dSdt, dEdt, dIdt, dRdt, dCu_incidence_dt]
+    dRdt = gamma * I - omega * R
+    dC_dt = sigma * E  # Incidence is the rate of new infections
+    return [dSdt, dEdt, dIdt, dRdt, dC_dt]
 #%%
 # beta functions
 #constant beta
 #because the ODE solver solve_ivp function expects a function for beta(t), we need to define a function that returns a constant value for beta at any time t. 
-
 def constant_beta(beta0):
     def beta_func(t):
         return beta0
@@ -78,17 +79,13 @@ def seasonal_beta(beta0, A, T, phase):
 #                                    β(t) = β1 if t1 <= t < t2
  #                                   β(t) = β2 if t2 <= t < t3, etc.
 
-def piecewise_beta(beta_values, time_intervals):
-    breakpoints = np.array(time_intervals)
+def piecewise_beta(beta_values, change_times):
+    beta_values = np.asarray(beta_values, dtype=float)
+    change_times = np.asarray(change_times, dtype=float)
+    assert len(beta_values) == len(change_times) + 1
     def beta_func(t):
-        if t < breakpoints[0]:
-            return beta_values[0]
-        elif t < breakpoints[1]:
-            return beta_values[1]
-        elif t < breakpoints[2]:
-            return beta_values[2]
-        else:
-            return beta_values[-1] #last value for t >= last breakpoint
+        idx = np.searchsorted(change_times, t, side="right")
+        return beta_values[idx]
     return beta_func
 
 #saw tooth beta function: β(t) = beta_min + (beta_max - beta_min) * ((t - t0) % T) / T
@@ -105,52 +102,77 @@ def sawtooth_beta(beta_min, beta_max, t0, T):
 
 #%%
 #generate incidence data from cumulative cases
-def gen_inci(beta_func, sigma, gamma, S0, E0, I0, R0, CuIn0, t):
+def gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t):
     y0 = [S0, E0, I0, R0, CuIn0] 
     #solve the SEIR model using solve_ivp, which is a numerical solver for ODE.
     #solve_ivp(fun, t_span, y0, args=(), t_eval=None, method='RK45', vectorized=False)),fun is the function that defines the system of ODEs, t_span is the time span for integration,y0 is the initial conditions, args are additional arguments to pass to the function like beta_func,sigma, gamma, t_eval is the time points at which to store the computed solution, method is the integration method to use (default is 'RK45'), and vectorized indicates whether fun is implemented in a vectorized fashion.
-    sol = solve_ivp(fun=seir_model, t_span=[t[0], t[-1]], y0=y0, args=(beta_func, sigma, gamma), 
+    sol = solve_ivp(fun=seir_model, t_span=[t[0], t[-1]], y0=y0, args=(beta_func, sigma, gamma, omega), 
                     t_eval=t, max_step= 0.1) # max_step is set to 0.1 to ensure we capture the dynamics accurately, especially if beta changes rapidly
     S, E, I, R, Cu_inci = sol.y
 
     #convert cumulative incidence to daily incidence, prepend the initial cumulative incidence to the beginning of the array to maintain the same length
-    inci = np.diff(Cu_inci, prepend=CuIn0)  # daily incidence is the difference in cumulative incidence
+    inci = np.maximum(np.diff(Cu_inci, prepend=CuIn0), 0.0)
     return S, E, I, R, Cu_inci, inci
+
+#%% 
+# calculate Rt 
+def calculate_rt(t, beta_func, S, N, gamma):
+    # Instantaneous effective reproduction number from Fraser 2007
+    # R_t = β(t) / γ · S(t) / N
+
 
 #%%
 if __name__ == "__main__":
-    N = 38000000
+    N = 10000
     S0 = N - 2
     E0 = 0
     I0 = 2
     R0 = 0
     CuIn0 = 2
-    sigma, gamma = 1/5.2, 1/10  # incubation period of 5.2 days and infectious period of 10 days
-    t = np.linspace(0, 365, 365)  # simulate for one year
+    sigma, gamma, omega = 1/5.2, 1/10, 0.0 #1/180  # incubation period of 5.2 days and infectious period of 10 days
+    t = np.arange(366)
     
     #beta functions parameters
     scenarios = { 
         "constant": constant_beta(0.3),
         "sigmoid": sigmoid_beta(beta_low=0.1, beta_high=0.4, k=0.1, t0=180),
         "seasonal": seasonal_beta(beta0=0.3, A=0.2, T=365, phase=0),
-        "piecewise": piecewise_beta(beta_values=[0.25, 0.15, 0.4], time_intervals=[0, 120, 240, 365]),
-        "sawtooth": sawtooth_beta(beta_min=0.2, beta_max=0.5, t0=0, T=60)
-    }
+        "piecewise": piecewise_beta([0.25, 0.15, 0.4], [120, 240]),
+        "sawtooth": sawtooth_beta(beta_min=0.08, beta_max=0.45, t0=0, T=50)
+    }    
+
+    # plot the betas
+    beta_curves = {}
+    for scenario, beta_func in scenarios.items():
+        beta_curves[scenario] = [beta_func(ti) for ti in t]
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig.suptitle("Beta Functions by Scenario")
+    for ax, (scenario, beta_vals) in zip(axes.flat, beta_curves.items()):
+        ax.plot(t, beta_vals)
+        ax.set_title(scenario.capitalize())
+        ax.set_xlabel("Time (days)")
+        ax.set_ylabel("Beta")
+    axes.flat[-1].set_visible(False)  # hide the unused 6th subplot
+    plt.tight_layout()
+    plt.savefig("beta_curves.png")
+    plt.close()
+
     incidence_curves = {}      
     for scenario, beta_func in scenarios.items():
         #.items() is a dictioanry that loops through both the keys and values of the dictionary, so in this case, scenario will be the name of the beta function with parameters and beta_func will be the corresponding beta function that we defined earlier.
-        S, E, I, R, Cu_inci, inci = gen_inci(beta_func, sigma, gamma, S0, E0, I0, R0, CuIn0, t)
+        S, E, I, R, Cu_inci, inci = gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t)
         incidence_curves[scenario] = inci
 
         #adding noise to the incidence data
         #poisson noise, if inci = [10,20,30], then noisy_inci_poisson= maybe [9, 18, 28] or [11, 22, 32], etc. 
-        noisy_inci_poisson = np.random.poisson(inci)
+        noisy_inci_poisson = rng.poisson(inci)
         incidence_curves[scenario + "_poisson"] = noisy_inci_poisson
         #negative binomial noise with overdispersion parameter phi = 5
         #negative_binomial(n, p, size=None), n = number of successes, p = probability of success, size = output shape.
         phi_values = [3, 4, 5, 20]  # different values of phi to try
         for phi in phi_values:
-            noisy_inci_nb = np.random.negative_binomial(n=phi, p=phi/(phi + inci))
+            # numpy NB: n=φ (dispersion), p=φ/(φ+μ) gives mean μ, var μ + μ²/φ
+            noisy_inci_nb = rng.negative_binomial(n=phi, p=phi/(phi + inci))
             incidence_curves[scenario + f"_nb_phi_{phi}"] = noisy_inci_nb
 
     #plotting the incidence curves for each scenario
@@ -179,11 +201,11 @@ if __name__ == "__main__":
     plt.plot(t, incidence_curves['seasonal'], 'r-',label = "seasonal_beta")
     plt.plot(t, incidence_curves["piecewise"], 'k-',label = "piecewise_beta")
     plt.plot(t, incidence_curves["sawtooth"], 'o-',label = "sawtooth_beta")
-    plt.plot(t, incidence_curves["constant_poisson"], 'b--' , label = "constant_beta with poisson noise")
-    plt.plot(t, incidence_curves["sigmoid_poisson"], 'g--',label = "sigmoid_beta with poisson noise")
-    plt.plot(t, incidence_curves["seasonal_poisson"], 'r--',label = "seasonal_beta with poisson noise")
-    plt.plot(t, incidence_curves["piecewise_poisson"], 'k--',label ="piecewise_beta with poisson noise")
-    plt.plot(t, incidence_curves["sawtooth_poisson"], 'o--',label = "sawtooth beta with poisson noise")
+    # plt.plot(t, incidence_curves["constant_poisson"], 'b--' , label = "constant_beta with poisson noise")
+    # plt.plot(t, incidence_curves["sigmoid_poisson"], 'g--',label = "sigmoid_beta with poisson noise")
+    # plt.plot(t, incidence_curves["seasonal_poisson"], 'r--',label = "seasonal_beta with poisson noise")
+    # plt.plot(t, incidence_curves["piecewise_poisson"], 'k--',label ="piecewise_beta with poisson noise")
+    # plt.plot(t, incidence_curves["sawtooth_poisson"], 'o--',label = "sawtooth beta with poisson noise")
     plt.title("incidence curve of diff bets with poisson noise")
     plt.xlabel("Time (days)")
     plt.ylabel("Daily incidence")
