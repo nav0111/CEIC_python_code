@@ -154,11 +154,39 @@ if __name__ == "__main__":
         "piecewise": piecewise_beta([0.25, 0.15, 0.4], [120, 240]),
         "sawtooth": sawtooth_beta(beta_min=0.08, beta_max=0.45, t0=0, T=50)
     }    
+#%%
+#function for getting data in PINN
+def get_inci_data(type):
+    t = np.arange(365)
+    N = 10000
+    S0 = N - 2
+    E0 = 0
+    I0 = 2
+    R0 = 0
+    CuIn0 = 2
+    sigma, gamma, omega = 1/5.2, 1/10, 1/90
 
+    if type == 'constant':
+        return get_data(t, constant_beta(0.4), [sigma, gamma, omega], [S0, E0, I0, R0, CuIn0])
+    elif type == 'sigmoid':
+        return get_data(t, sigmoid_beta(beta_low=0.1, beta_high=0.4, k=0.1, t0=180),
+                             [sigma, gamma, omega], [S0, E0, I0, R0, CuIn0] )
+    elif type == 'seasonal':
+        return get_data(t, seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0), [sigma, gamma, omega],
+                             [S0, E0, I0, R0, CuIn0])
+    elif type == 'piecewise':
+        return get_data(t, piecewise_beta([0.25, 0.15, 0.4], [120, 240]), [sigma, gamma, omega],
+                             [S0, E0, I0, R0, CuIn0])
+    elif type == "sawtooth":
+        return get_data(t, sawtooth_beta(beta_min=0.08, beta_max=0.45, t0=0, T=50), 
+                             [sigma, gamma, omega], [S0, E0, I0, R0, CuIn0])
+        
+    
+
+#%%
     beta_curves = {}
     rt_curves = {}
-    incidence_curves = {}    
-    incidence_data = {}   
+    incidence_curves = {}     
     for scenario, beta_func in scenarios.items():
         # save beta curves for plotting later
         beta_curves[scenario] = [beta_func(tval) for tval in t]
@@ -170,9 +198,6 @@ if __name__ == "__main__":
 
         # add Rt curves for plotting later
         rt_curves[scenario] = calculate_rt(t, beta_func, S, gamma, N)
-
-        #get icidence data
-        #incidence_data[scenario] = get_data(t, beta_func)
 
         #adding noise to the incidence data
         #poisson noise, if inci = [10,20,30], then noisy_inci_poisson= maybe [9, 18, 28] or [11, 22, 32], etc. 
@@ -261,4 +286,11 @@ if __name__ == "__main__":
     plt.legend()
     plt.savefig("incidence_curve_from_get_data.png")
     plt.close()
+
+
+#get incidence
+data = get_inci_data(type='constant')
+print(data)
+print(len(data))
+
 
