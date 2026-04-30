@@ -127,6 +127,14 @@ def calculate_rt(t_arr, beta_func, susc_arr, N, gamma):
         R_t.append(beta_func(t) / gamma * susc_arr[t] / N) 
     return R_t
 
+#function for incidence curve
+def get_data(t_arr, beta_func, params, ICs):
+    sigma, gamma, omega = params
+    S0, E0, I0, R0, CuIn0 = ICs
+    inci_t = []
+    S, E, I, R, Cu_inci, inci= gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t_arr)
+    return inci
+
 
 #%%
 if __name__ == "__main__":
@@ -150,7 +158,8 @@ if __name__ == "__main__":
 
     beta_curves = {}
     rt_curves = {}
-    incidence_curves = {}       
+    incidence_curves = {}    
+    incidence_data = {}   
     for scenario, beta_func in scenarios.items():
         # save beta curves for plotting later
         beta_curves[scenario] = [beta_func(tval) for tval in t]
@@ -163,6 +172,9 @@ if __name__ == "__main__":
         # add Rt curves for plotting later
         rt_curves[scenario] = calculate_rt(t, beta_func, S, gamma, N)
 
+        #get icidence data
+        #incidence_data[scenario] = get_data(t, beta_func)
+
         #adding noise to the incidence data
         #poisson noise, if inci = [10,20,30], then noisy_inci_poisson= maybe [9, 18, 28] or [11, 22, 32], etc. 
         noisy_inci_poisson = rng.poisson(inci)
@@ -174,6 +186,7 @@ if __name__ == "__main__":
             # numpy NB: n=φ (dispersion), p=φ/(φ+μ) gives mean μ, var μ + μ²/φ
             noisy_inci_nb = rng.negative_binomial(n=phi, p=phi/(phi + inci))
             incidence_curves[scenario + f"_nb_phi_{phi}"] = noisy_inci_nb
+    
     
     # plotting beta curves
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
@@ -234,3 +247,9 @@ if __name__ == "__main__":
     plt.legend()
     plt.savefig("rt_curves.png")
     plt.close()
+
+    #get incidence data for a specific beta
+    incidence = get_data(t, sigmoid_beta(beta_low=0.1, beta_high=0.4, k=0.1, t0=180), [sigma, gamma, omega], [S0, E0, I0, R0, CuIn0])
+    
+    print(incidence)
+    print(len(incidence))
