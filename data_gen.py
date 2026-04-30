@@ -131,7 +131,6 @@ def calculate_rt(t_arr, beta_func, susc_arr, N, gamma):
 def get_data(t_arr, beta_func, params, ICs):
     sigma, gamma, omega = params
     S0, E0, I0, R0, CuIn0 = ICs
-    inci_t = []
     S, E, I, R, Cu_inci, inci= gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t_arr)
     return inci
 
@@ -253,3 +252,13 @@ if __name__ == "__main__":
     
     print(incidence)
     print(len(incidence))
+
+    plt.figure(figsize=(15,10))
+    plt.plot(t, incidence, label = 'incidence')
+    plt.title("incidence_curve")
+    plt.xlabel("Time(days)")
+    plt.ylabel("incidence")
+    plt.legend()
+    plt.savefig("incidence_curve_from_get_data.png")
+    plt.close()
+
