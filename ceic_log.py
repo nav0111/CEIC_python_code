@@ -86,7 +86,7 @@ def forward_with_constraints(model, t):
 
 #%%
 #ODE loss
-def ode_loss(model, t, params, T_max):
+def ode_loss(model, t, params, T_max, epsilon):
     sigma_array, gamma_array = params
     out = forward_with_constraints(model, t)
    
@@ -119,10 +119,24 @@ def ode_loss(model, t, params, T_max):
     r_R = dRdt - T_max * (gamma * I)
     r_C_inci = dC_incidt - T_max * (sigma * E)
 
-    loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2 + r_C_inci**2).mean()
-    return loss
+    loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2 + r_C_inci**2)
 
+    
+    past_errors = loss.detach()
+    #compute number of points
+    n_points = past_errors.shape[0]
+    cumulative_past_errors = torch.zeros(n_points)
+    cumulative_past_errors[1:] = torch.cumsum(past_errors[:-1], dim =0)
 
+    #weight = exp(-epsilon * cumulative past errors)
+    weights = torch.exp(-epsilon * cumulative_past_errors)
+
+    #at t=0, weight must be 1, because we should learn the IC first
+    weights[0] = 1.0
+    weighted_error = weights * loss
+
+    ode_loss = weighted_error.mean()
+    return ode_loss
 
 #%%
 #Initial condition loss
@@ -149,13 +163,13 @@ def ic_loss(model, ICs, T_max, params):
     #get sigma and gamma at t=0
     sigma = torch.tensor(sigma_array[0], dtype=torch.float32)
     gamma = torch.tensor(gamma_array[0], dtype=torch.float32)
-    Trans = out[0,5] * out[0,0] * out[0,2] # beta * S * I at t=0
+    Trans = out[0,5] * S0 * I0 # beta * S * I at t=0
    
     r_S = dSdt +  T_max * Trans
-    r_E = dEdt -  T_max * (Trans - sigma * out[0,1])
-    r_I = dIdt - T_max * (sigma * out[0,1] - gamma * out[0,2])
-    r_R = dRdt - T_max * (gamma * out[0,2])
-    r_C_inci = dC_incidt - T_max * (sigma * out[0,1])
+    r_E = dEdt -  T_max * (Trans - sigma * E0)
+    r_I = dIdt - T_max * (sigma * E0 - gamma * I0)
+    r_R = dRdt - T_max * (gamma * I0)
+    r_C_inci = dC_incidt - T_max * (sigma * E0)
    
     d_loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2 + r_C_inci**2).mean()
    
@@ -236,7 +250,7 @@ def train_model(epochs=40000, test_days=100, save=False):
         l_ic = ic_loss(model, ICs, T_max, params)
        
         # ODE loss - Using FULL time tensor
-        l_ode = ode_loss(model, t_train_tensor, params, T_max)
+        l_ode = ode_loss(model, t_train_tensor, params, T_max, epsilon =20.0)
        
         # Data loss - Only on training points
         l_data = data_loss(model, t_train_np, Ir_train)
@@ -453,6 +467,7 @@ def plot_R_t_comparison(out, cases, params, variants, data_start_date):
     # using the same date_to_day function to convert variant period dates to day indices for plotting
     def date_to_day(dt):
         return (dt - data_start_date).days
+
     plt.figure(figsize=(14, 7))
     variant_colors = ['purple', 'orange', 'green', 'brown']
     plt.plot(days, Rt_pinn, color='orange', linewidth=2, label='R_t (PINN)')
@@ -484,7 +499,7 @@ def load_model(path):
 #Run everything
 if __name__ == "__main__":
     
-    #train_model(epochs=50000, test_days=100, save=True)
+    train_model(epochs=50000, test_days=100, save=True)
     # run_training(save=True)
     model = load_model("pinn_model.pth")
     t_np_full, t_full, total_days, cases = time_to_train()
@@ -495,13 +510,15 @@ if __name__ == "__main__":
     
     print(out.shape)
     print(out[:, 4].shape)
-    plt.plot(out[:,4]*N )
-    plt.plot(np.cumsum(cases))
+    plt.plot(out[:,4]*N , label= 'PINN output')
+    plt.plot(np.cumsum(cases), label = 'observed')
+    plt.legend()
     plt.savefig("cumulative_cases.png")
     plt.close()
 
-    plt.plot(np.diff(out[:,4]*N ))
-    plt.plot(cases)
+    plt.plot(np.diff(out[:,4]*N ), label ='PINN output')
+    plt.plot(cases, label = 'observed')
+    plt.legend()
     plt.savefig("daily_cases.png")
     plt.close()
 
@@ -649,49 +666,3 @@ def export_R_t_for_epinow2(out, params, t_np, filename = 'pinn_R_t.csv'):
 
 
 export_R_t_for_epinow2(out, params, t_np_full, filename='pinn_R_t.csv')
-
-#Used these codes in Rstudio to get simulation results
-"""
-library(EpiNow2)
-library(data.table)
-library(reticulate)
-
-getwd()
-
-# if file exists
-file.exists("/Users/srejon/pinn_R_t.csv")
-
-#load PINN R_t
-r_t <- fread("pinn_R_t.csv")
-
-# Convert numeric time to dates
-# Assuming time starts at 0 and each increment is 1 day
-# Adjusting the start_date and time unit based on  actual data
-total_days <- length(r_t$time)
-start_date <- as.Date("2020-01-23")
-r_t[, date := start_date + (time * total_days)]
-head(r_t)
-
-# Rename R_t to R
-setnames(r_t, "R_t", "R")
-
-#defining generation time for covid-19
-#gt is serial interval, lognormal because never negative and right skewed
-
-gt <- generation_time_opts(LogNormal(meanlog = 1.6, sdlog = 0.4, max = 14))
-
-#reporting delay, time between when got infected and when reported
-delays <- delay_opts(LogNormal(meanlog = 0.5, sdlog = 0.4, max = 10))
-
- sims <- simulate_infections(R = r_t[, .(date, R)], # using date and R_t columns
-     initial_infections = 2,
-     generation_time = gt,
-     delays = delays,
-     obs = obs_opts(dispersion = Fixed(1)) #dispersion controls the difference between true cases and reported cases
-     #dispersion is 1 means poisson distribution, assumes true cases = reported cases with some random noise
-     
-   )
-
-fwrite(sims, "simulation_results.csv")
-"""
-
