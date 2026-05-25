@@ -132,7 +132,10 @@ def get_data(t_arr, beta_func, params, ICs):
     sigma, gamma, omega = params
     S0, E0, I0, R0, CuIn0 = ICs
     S, E, I, R, Cu_inci, inci= gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t_arr)
-    return inci
+    #get inci data with poisson noise in the last 90% of the time series
+    noise_start = int(0.1 * len(t_arr))
+    noisy_inci = rng.poisson(inci[noise_start:])
+    return noisy_inci
 
 
 #%%
@@ -289,7 +292,10 @@ def get_inci_data(type):
 
 
 #get incidence
-data = get_inci_data(type='constant')
+data = get_inci_data(type='seasonal')
+plt.plot( data, label = 'incidence')
+plt.savefig("incidence_curve_from_get_inci_data.png")
+plt.close()
 print(data)
 print(len(data))
 
