@@ -20,6 +20,8 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+data = data_gen.seasonal_beta(beta0 = 0.3, A= 0.2, T =180, phase = 0)(np.linspace(0,365,365))
+
 def get_canada_data():
     df = data_gen.get_inci_data(type= 'seasonal')
     return df
@@ -600,7 +602,7 @@ if __name__ == "__main__":
     N= 10000
     t_np_full, t_full, total_days, cases = time_to_train()
     params = get_parama(total_days)
-    num_runs = 100
+    num_runs = 1
     #store errors for each run
     simple_error = []
     ceic_error = []
@@ -608,15 +610,15 @@ if __name__ == "__main__":
         print("RUN:", run +1)
         set_seed(run)
         print("Training simple PINN__")
-        model_simple, history_s, train_days = train_model(epochs = 50000, test_days= 65, causal= False,
-                                                        epsilon= 3, save = True, model_name= f"simple_pinn_run_{run+1}")
+        # model_simple, history_s, train_days = train_model(epochs = 50000, test_days= 65, causal= False,
+        #                                                 epsilon= 3, save = True, model_name= f"simple_pinn_run_{run+1}")
         print("Training CEIC PINN__")
-        model_ceic, history_c, train_days = train_model(epochs= 50000, test_days= 65, causal = True,
-                                                       epsilon= 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
+        # model_ceic, history_c, train_days = train_model(epochs= 50000, test_days= 65, causal = True,
+        #                                                epsilon= 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
 
         #load model
-        # model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
-        # model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
+        model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
+        model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
         with torch.no_grad():
             out_simple = forward_with_constraints(model= model_simple, t = t_full).numpy()
             out_ceic = forward_with_constraints(model= model_ceic, t = t_full).numpy()
@@ -684,6 +686,25 @@ if __name__ == "__main__":
             #plot_R_t_comparison(out_ceic, cases, params, CANADA_VARIANTS, data_start_date = datetime.datetime(2020, 1, 23))
             #plot_all(model_ceic, train_days, t_full)
             model_comparison(model_simple, model_ceic, t_full)
+
+            #"seasonal": seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0),
+
+            
+            
+        
+
+            #plt.plot(  out_simple[:, 5], label = 'simple_pinn' )
+            plt.plot(  out_ceic[:, 5], label = 'ceic_pinn')
+            plt.plot( data, label = 'seasonal_beta')
+            plt.legend()
+            plt.savefig("beta_comp.png")
+            plt.close()
+
+            data = get_canada_data()
+            plt.plot(data, label= 'observed')
+            plt.savefig('observed.png')
+            plt.close()
+
 
     
 
