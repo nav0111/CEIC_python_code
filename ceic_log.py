@@ -20,8 +20,6 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-data = data_gen.seasonal_beta(beta0 = 0.3, A= 0.2, T =180, phase = 0)(np.linspace(0,365,365))
-
 def get_canada_data():
     df = data_gen.get_inci_data(type= 'seasonal')
     return df
@@ -232,14 +230,15 @@ def time_to_train():
     total_days = len(cases)
     t_np_full = np.linspace(0, 1, total_days, dtype=np.float32)
     t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-    return t_np_full, t_full, total_days, cases
+    return t_np_full, t_full, total_days
 #%%
 #Train model
 def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
     N = 10000
     ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0] # no covid cases at the start, seed with 1 or 2 or 10
-    t_np_full, t_full, total_days, cases = time_to_train()
+    t_np_full, t_full, total_days = time_to_train()
+    cases = get_canada_data()
     Ir_obs = cases / N # convert cases to a proportion
     
     # Split into train and test
@@ -319,7 +318,8 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save 
 #%%
 #Plot
 def plot_all(model, train_days,t_full):
-    t_np_full, t_full, total_days, cases = time_to_train()
+    t_np_full, t_full, total_days = time_to_train()
+    cases = get_canada_data()
     days = np.arange(total_days)
    
     # Convert cases to numpy
@@ -511,7 +511,8 @@ def plot_R_t_comparison(out, cases, params, variants, data_start_date):
 #%%
 #plot model comparison (simple PINN vs CEIC PINN)
 def model_comparison(model1, model2, t):
-    t_np_full, t_full, total_days, cases = time_to_train()
+    t_np_full, t_full, total_days = time_to_train()
+    cases = get_canada_data()
     days = np.arange(total_days)
     N = 10000
     sigma_array, gamma_array = get_parama(total_days)
@@ -600,25 +601,33 @@ def load_model(path):
 #Run everything
 if __name__ == "__main__":
     N= 10000
-    t_np_full, t_full, total_days, cases = time_to_train()
-    params = get_parama(total_days)
     num_runs = 1
     #store errors for each run
     simple_error = []
     ceic_error = []
+
+    #store beta for each run to see the variability across runs
+    all_beta_simple = []
+    all_beta_ceic = []
+    
     for run in range(num_runs):
+        t_np_full, t_full, total_days = time_to_train()
+        cases = get_canada_data()
+
+ 
+        params = get_parama(total_days)
         print("RUN:", run +1)
-        set_seed(run)
+        #set_seed(run)
         print("Training simple PINN__")
-        # model_simple, history_s, train_days = train_model(epochs = 50000, test_days= 65, causal= False,
-        #                                                 epsilon= 3, save = True, model_name= f"simple_pinn_run_{run+1}")
+        model_simple, history_s, train_days = train_model(epochs = 5000, test_days= 65, causal= False,
+                                                         epsilon= 3, save = True, model_name= f"simple_pinn_run_{run+1}")
         print("Training CEIC PINN__")
-        # model_ceic, history_c, train_days = train_model(epochs= 50000, test_days= 65, causal = True,
-        #                                                epsilon= 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
+        model_ceic, history_c, train_days = train_model(epochs= 5000, test_days= 65, causal = True,
+                                                       epsilon= 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
 
         #load model
-        model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
-        model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
+        # model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
+        # model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
         with torch.no_grad():
             out_simple = forward_with_constraints(model= model_simple, t = t_full).numpy()
             out_ceic = forward_with_constraints(model= model_ceic, t = t_full).numpy()
@@ -638,6 +647,13 @@ if __name__ == "__main__":
 
             simple_error.append(mse_simple)
             ceic_error.append(mse_ceic)
+
+
+            beta_simple = out_simple[:, 5]  # beta is column 5
+            beta_ceic   = out_ceic[:, 5]
+
+            all_beta_simple.append(beta_simple)
+            all_beta_ceic.append(beta_ceic)
 
             #summary
             print(f"RUN {run +1} : Simple PINN MSE: {mse_simple: .3f}, CEIC PINN MSE: {mse_ceic: .3f}")
@@ -664,6 +680,7 @@ if __name__ == "__main__":
             t_stat, p_value = ttest_rel(simple_error, ceic_error)
             print(f"Paired t-test: t-statistic = {t_stat:.3f}, p-value = {p_value:.3f}")
 
+
             #boxplot comparison
             plt.figure(figsize=(8, 6))
             plt.boxplot([simple_error, ceic_error], tick_labels = ['Simple PINN', 'CEIC PINN'])
@@ -672,9 +689,8 @@ if __name__ == "__main__":
             plt.grid(True)
             plt.savefig("model_comparison_boxplot.png")
             plt.close()
-
-            #95% confidence interval bar_chart
-            #yerr in bar chart means the error bars, which represent the variability of the data, in this case, the confidence interval for the mean MSE of each model. The error bars will extend from the mean value to the upper and lower bounds of the confidence interval, visually showing the range within which we can be 95% confident that the true mean MSE lies for each model.
+           #95% confidence interval bar_chart
+           #yerr in bar chart means the error bars, which represent the variability of the data, in this case, the confidence interval for the mean MSE of each model. The error bars will extend from the mean value to the upper and lower bounds of the confidence interval, visually showing the range within which we can be 95% confident that the true mean MSE lies for each model.
             plt.figure(figsize=(8, 6))
             plt.bar(['Simple PINN', 'CEIC PINN'], [simple_mean_error, ceic_mean_error], yerr=[simple_CI_error, ceic_CI_error])
             plt.ylabel('Mean MSE')
@@ -682,28 +698,29 @@ if __name__ == "__main__":
             plt.grid(True)
             plt.savefig("model_comparison_barplot.png")
             plt.close()
-
             #plot_R_t_comparison(out_ceic, cases, params, CANADA_VARIANTS, data_start_date = datetime.datetime(2020, 1, 23))
             #plot_all(model_ceic, train_days, t_full)
             model_comparison(model_simple, model_ceic, t_full)
 
-            #"seasonal": seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0),
+            #calling observed beta
+            true_beta = data_gen.seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0)(t_np_full)
+            #plot beta variability across runs for just CEIC and true beta
+            plt.figure(figsize=(14, 8))
+            for beta in all_beta_ceic:
+                plt.plot(t_np_full, beta, label = 'CEIC PINN', color = 'blue')
+                plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
+            plt.title('Beta Variability Across Runs (CEIC PINN)')
+            plt.xlabel('Days')
+            plt.ylabel('Beta')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig("beta_variability_ceic.png")
+            plt.close()
 
             
-            
+
         
 
-            #plt.plot(  out_simple[:, 5], label = 'simple_pinn' )
-            plt.plot(  out_ceic[:, 5], label = 'ceic_pinn')
-            plt.plot( data, label = 'seasonal_beta')
-            plt.legend()
-            plt.savefig("beta_comp.png")
-            plt.close()
-
-            data = get_canada_data()
-            plt.plot(data, label= 'observed')
-            plt.savefig('observed.png')
-            plt.close()
 
 
     
