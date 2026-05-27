@@ -33,7 +33,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
-rng = np.random.default_rng(seed=627)
+#rng = np.random.default_rng(seed=627)
 
 def seir_model(t, y, beta_func, sigma, gamma, omega = 0.0):
     S, E, I, R, C = y
@@ -132,10 +132,21 @@ def get_data(t_arr, beta_func, params, ICs):
     sigma, gamma, omega = params
     S0, E0, I0, R0, CuIn0 = ICs
     S, E, I, R, Cu_inci, inci= gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t_arr)
-    #get inci data with poisson noise in the last 90% of the time series
+    #get inci data with poisson noise in the last 100% of the time series
     noise_start = int(0.1 * len(t_arr))
-    noisy_inci = rng.poisson(inci[noise_start:])
+    #noisy_inci_tail = np.random.poisson(lam=5, size=len(inci))
+    epsi = 0.001
+    uu = np.random.uniform(0, 1, size = len(inci))
+    noise = 1 - epsi + 2*epsi*uu
+    noisy_inci = np.round(inci * noise).astype(int)
+    #adding the noise to  the incidence data
+   
     return noisy_inci
+
+df = get_data(t_arr = np.arange(365), beta_func= seasonal_beta(beta0 = 0.3, A = 0.2, T = 180, phase= 0), 
+              params = [1/1.2, 1/10, 1/90], ICs= [9998, 0, 2, 0, 2])
+
+print(df)
 
 
 #%%
@@ -296,7 +307,8 @@ data = get_inci_data(type='seasonal')
 plt.plot( data, label = 'incidence')
 plt.savefig("incidence_curve_from_get_inci_data.png")
 plt.close()
-print(data)
-print(len(data))
+
+
+
 
 
