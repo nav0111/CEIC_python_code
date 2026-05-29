@@ -20,7 +20,7 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 def get_canada_data():
-    df = data_gen.get_inci_data(type= 'piecewise')
+    df = data_gen.get_inci_data(type= 'seasonal')
     return df
 
 #import data_gen
@@ -116,14 +116,14 @@ def forward_with_constraints(model, t):
     beta = F.softplus(raw[:, 4:5])
     return torch.cat([S, E, I, R, beta], dim=1)
 
-#define daily incidence
-def daily_incidence(model, t):
-    out = forward_with_constraints(model, t)
-    E = out[:, 1]
-    sigma_array, gamma_array = get_parama(len(t))
-    sigma = torch.tensor(sigma_array, dtype = torch.float32)
-    daily_inci = sigma * E
-    return daily_inci
+# #define daily incidence
+# def daily_incidence(model, t):
+#     out = forward_with_constraints(model, t)
+#     E = out[:, 1]
+#     sigma_array, gamma_array = get_parama(len(t))
+#     sigma = torch.tensor(sigma_array, dtype = torch.float32)
+#     daily_inci = sigma * E
+#     return daily_inci
 
 
 #%%
@@ -132,6 +132,7 @@ def ode_loss(model, t, params, epsilon, causal = False):
     sigma_array, gamma_array = params
     out = forward_with_constraints(model, t)
    
+    # the output of the neural network at time t
     S = out[:, 0]
     E = out[:, 1]
     I = out[:, 2]
@@ -146,7 +147,6 @@ def ode_loss(model, t, params, epsilon, causal = False):
     dEdt = grad.grad(E, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dIdt = grad.grad(I, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dRdt = grad.grad(R, t, grad_outputs=ones, create_graph=True)[0].squeeze()
-    dbetadt = grad.grad(beta, t, grad_outputs=ones, create_graph=True)[0].squeeze()
    
     #convert sigma and gamma arrays to tensors and get the values at the corresponding time points
     sigma = torch.tensor(sigma_array, dtype=torch.float32)
@@ -160,7 +160,6 @@ def ode_loss(model, t, params, epsilon, causal = False):
     r_R = dRdt - (gamma * I)
     loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2)
 
-    
     if causal:
         past_errors = loss.detach()
         #compute number of points
@@ -201,14 +200,27 @@ def ic_loss(model, ICs):
 # data loss
 def data_loss(model, t_np, I_obs, sigma_array):
     t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-    observed = torch.tensor(I_obs, dtype=torch.float32)
+    # observed incidence or cumualtive incidence
+    observed = torch.tensor((I_obs), dtype=torch.float32)
     
+    # data loss 
+    # calculate cumulative incidence from the model 
     out = forward_with_constraints(model, t_k)
+    S = out[:, 0]
     E = out[:, 1]
+    I = out[:, 2]
+    beta = out [:, 4]
     sigma = torch.tensor(sigma_array, dtype=torch.float32)
-    pred_inci = sigma * E
-    v_loss = torch.mean((pred_inci - observed) **2)
-    return v_loss
+    C = sigma * E 
+    # dEdT = beta S I - C
+    # C = dEdT - beta S I 
+    ones = torch.ones_like(E)
+    dEdt = grad.grad(E, t_k, grad_outputs=ones, create_graph=True)[0].squeeze()
+    C =  beta * S * I - dEdt
+
+    v_loss = torch.mean((C - observed) **2)
+    return v_loss, C
+
 
 #%%
 #Time to train the model
@@ -236,6 +248,9 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
     t_train_np = t_np_full[train_indices] # training time
     t_train_tensor = torch.tensor(t_train_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True) 
     Ir_train = Ir_obs[train_indices]      # and cases at those time points
+
+    print(f"t_train_np: {t_train_np[:20].flatten()}")
+    print(f"t_train_tensor: {t_train_tensor[:20].flatten()}")
     
     #time_varying parameters for the variants
     params_full = get_parama(total_days)
@@ -250,7 +265,7 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
     def get_weights(ep):
         w_ic = 100  
         w_ode = 1.0  # Keep ODE weight constant
-        w_data = 10 + 0.5 * ep  # Higher starting weight
+        w_data = 1000   #
         return w_ic, w_ode, w_data
 
     print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'data':>12} {'Total':>12}  S_range       beta_range")
@@ -261,7 +276,7 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
         optimizer.zero_grad() #reset any previous gradients
         
         l_ic = ic_loss(model, ICs)
-        l_data = data_loss(model, t_train_np, Ir_train, sigma_array[train_indices])
+        l_data, C = data_loss(model, t_train_np, Ir_train, sigma_array[train_indices])
 
         if causal:
             l_ode = ode_loss(model, t_train_tensor, params, epsilon=epsilon, causal=True)
@@ -290,7 +305,7 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
                   f"{loss.item():}  {s_range}  {b_range}")
     if save: 
         torch.save(model.state_dict(), f"{model_name}.pth") 
-    return model, history, train_days
+    return model, history, train_days, C
 
 #%%
 #Plot
@@ -604,10 +619,10 @@ if __name__ == "__main__":
         #set_seed(run)
         
         print("Training simple PINN__")
-        model_simple, history_s, train_days = train_model(epochs = 5000, test_days= 65, causal= False,
+        model_simple, history_s, train_days, C_simple = train_model(epochs = 20000, test_days= 65, causal= False,
                                                          epsilon = 3, save = True, model_name= f"simple_pinn_run_{run+1}")
         print("Training CEIC PINN__")
-        model_ceic, history_c, train_days = train_model(epochs= 5000, test_days= 65, causal = True,
+        model_ceic, history_c, train_days, C_ceic = train_model(epochs= 20000, test_days= 65, causal = True,
                                                        epsilon = 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
 
         #load model
@@ -617,22 +632,17 @@ if __name__ == "__main__":
             out_simple = forward_with_constraints(model= model_simple, t = t_full).numpy()
             out_ceic = forward_with_constraints(model= model_ceic, t = t_full).numpy()
 
-            #predictions
-            pred_simple_daily_inci = sigma_array * out_simple[:, 1] * N
-            pred_ceic_daily_inci = sigma_array * out_ceic[:, 1] * N
-            observed_daily_inci = cases
-
             beta_simple = out_simple[:, 4]  # beta is column 4
             beta_ceic   = out_ceic[:, 4]
 
             all_beta_simple.append(beta_simple)
             all_beta_ceic.append(beta_ceic)
 
-        model_comparison(model_simple, model_ceic, t_full)
+        #model_comparison(model_simple, model_ceic, t_full)
 
             #calling observed beta
-        #true_beta = data_gen.seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0)(t_np_full)
-        true_beta = data_gen.piecewise_beta([0.1, 0.15, 0.25, 0.3, 0.4], [60,120, 240, 300])(t_np_full)
+        true_beta = data_gen.seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0)(t_np_full)
+        #true_beta = data_gen.piecewise_beta([0.1, 0.15, 0.25, 0.3, 0.4], [60,120, 240, 300])(t_np_full)
         #plot beta variability across runs for CEIC and true beta and simple PINN
         plt.figure(figsize=(14, 8))
         for i, beta in enumerate(all_beta_ceic):
@@ -647,6 +657,7 @@ if __name__ == "__main__":
         plt.grid(True)
         plt.savefig("beta_variability_ceic_and_simple.png")
         plt.close()
+
 
             
 
