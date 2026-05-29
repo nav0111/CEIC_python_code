@@ -13,7 +13,6 @@ from scipy.stats import gamma as gamma_dist
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 import random
-from scipy.stats import ttest_rel
 import data_gen
 
 def set_seed(seed):
@@ -21,7 +20,7 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 def get_canada_data():
-    df = data_gen.get_inci_data(type= 'seasonal')
+    df = data_gen.get_inci_data(type= 'piecewise')
     return df
 
 #import data_gen
@@ -37,7 +36,7 @@ def get_canada_data():
 
 
 #%%
-# #Canada Data
+#Canada Data
 # def get_canada_data():
 #     df = pd.read_csv('cases_can.csv')  
 #     df['date'] = pd.to_datetime(df['date'])
@@ -46,42 +45,52 @@ def get_canada_data():
 
 #%%
 #Variant periods in Canada based on public health data and reports, with start and end dates for each variant's dominance
-CANADA_VARIANTS = {
-    'Alpha':   (datetime.datetime(2020, 12, 27), datetime.datetime(2021, 6, 30)),
-    'Delta':   (datetime.datetime(2021, 7, 1),   datetime.datetime(2021, 12, 14)),
-    'Omicron': (datetime.datetime(2021, 12, 15), datetime.datetime(2022, 5, 31)),
-    'BA.5':    (datetime.datetime(2022, 6, 1),   datetime.datetime(2023, 1, 31)),
-}
+# CANADA_VARIANTS = {
+#     'Alpha':   (datetime.datetime(2020, 12, 27), datetime.datetime(2021, 6, 30)),
+#     'Delta':   (datetime.datetime(2021, 7, 1),   datetime.datetime(2021, 12, 14)),
+#     'Omicron': (datetime.datetime(2021, 12, 15), datetime.datetime(2022, 5, 31)),
+#     'BA.5':    (datetime.datetime(2022, 6, 1),   datetime.datetime(2023, 1, 31)),
+# }
 
-#%%
-#Variant parameters (sigma and gamma) based on literature estimates of incubation and infectious periods for each variant, converted to rates (1/days)
-VARIANT_PARAMS = {
-    'Alpha': (1/5.2, 1/10),  # sigma, gamma
-    'Delta': (1/4.5, 1/8),
-    'Omicron': (1/3.5, 1/6),
-    'BA.5': (1/3.0, 1/5)
-}
+# #%%
+# #Variant parameters (sigma and gamma) based on literature estimates of incubation and infectious periods for each variant, converted to rates (1/days)
+# VARIANT_PARAMS = {
+#     'Alpha': (1/5.2, 1/10),  # sigma, gamma
+#     'Delta': (1/4.5, 1/8),
+#     'Omicron': (1/3.5, 1/6),
+#     'BA.5': (1/3.0, 1/5)
+# }
 
-#%%
+# #%%
 
+# def get_parama(total_days):
+#     #sigma and gamma parameters for the variants in covid
+#     start_date = datetime.datetime(2020, 1, 23)
+
+#     #create empty arrays for sigma and gamma 
+#     sigma_t = np.zeros(total_days)
+#     gamma_t = np.zeros(total_days)
+
+#     #loop through each day and assign sigma and gamma based on the variant period
+#     for i in range(total_days):
+#         current_date = start_date + datetime.timedelta(days=i)
+#         for variant, (start, end) in CANADA_VARIANTS.items():
+#             if start <= current_date <= end:
+#                 sigma_t[i], gamma_t[i] = VARIANT_PARAMS[variant]
+#                 break
+#         else:
+#             sigma_t[i], gamma_t[i] = VARIANT_PARAMS['Alpha'] # default to Alpha parameters if no variant matches
+
+#     params = sigma_t, gamma_t
+#     return params
+
+#synthetic data params
 def get_parama(total_days):
-    #sigma and gamma parameters for the variants in covid
-    start_date = datetime.datetime(2020, 1, 23)
-
-    #create empty arrays for sigma and gamma 
-    sigma_t = np.zeros(total_days)
-    gamma_t = np.zeros(total_days)
-
-    #loop through each day and assign sigma and gamma based on the variant period
-    for i in range(total_days):
-        current_date = start_date + datetime.timedelta(days=i)
-        for variant, (start, end) in CANADA_VARIANTS.items():
-            if start <= current_date <= end:
-                sigma_t[i], gamma_t[i] = VARIANT_PARAMS[variant]
-                break
-        else:
-            sigma_t[i], gamma_t[i] = VARIANT_PARAMS['Alpha'] # default to Alpha parameters if no variant matches
-
+    """Constant sigma and gamma for synthetic data"""
+    sigma = 1/5.2  
+    gamma = 1/10   
+    sigma_t = np.full(total_days, sigma)
+    gamma_t = np.full(total_days, gamma)
     params = sigma_t, gamma_t
     return params
 
@@ -92,7 +101,7 @@ def create_model():
         nn.Linear(1, 64), nn.Tanh(),
         nn.Linear(64, 64), nn.Tanh(),
         nn.Linear(64, 64), nn.Tanh(),
-        nn.Linear(64, 6)
+        nn.Linear(64, 5)
     )
     return model
 
@@ -104,13 +113,22 @@ def forward_with_constraints(model, t):
     E = F.softplus(raw[:, 1:2])
     I = F.softplus(raw[:, 2:3])
     R = F.softplus(raw[:, 3:4])
-    C_inci = F.softplus(raw[:, 4:5])
-    beta = F.softplus(raw[:, 5:6])
-    return torch.cat([S, E, I, R, C_inci, beta], dim=1)
+    beta = F.softplus(raw[:, 4:5])
+    return torch.cat([S, E, I, R, beta], dim=1)
+
+#define daily incidence
+def daily_incidence(model, t):
+    out = forward_with_constraints(model, t)
+    E = out[:, 1]
+    sigma_array, gamma_array = get_parama(len(t))
+    sigma = torch.tensor(sigma_array, dtype = torch.float32)
+    daily_inci = sigma * E
+    return daily_inci
+
 
 #%%
 #ODE loss
-def ode_loss(model, t, params, T_max, epsilon, causal = False):
+def ode_loss(model, t, params, epsilon, causal = False):
     sigma_array, gamma_array = params
     out = forward_with_constraints(model, t)
    
@@ -118,8 +136,7 @@ def ode_loss(model, t, params, T_max, epsilon, causal = False):
     E = out[:, 1]
     I = out[:, 2]
     R = out[:, 3]
-    C_inci = out[:, 4]
-    beta = out[:, 5]
+    beta = out[:, 4]
 
    #creates a tensor of all 1's same shape as S, need this to combine gradients from multiple outputs
     ones = torch.ones_like(S)
@@ -129,7 +146,6 @@ def ode_loss(model, t, params, T_max, epsilon, causal = False):
     dEdt = grad.grad(E, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dIdt = grad.grad(I, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dRdt = grad.grad(R, t, grad_outputs=ones, create_graph=True)[0].squeeze()
-    dC_incidt = grad.grad(C_inci, t, grad_outputs=ones, create_graph=True)[0].squeeze()
     dbetadt = grad.grad(beta, t, grad_outputs=ones, create_graph=True)[0].squeeze()
    
     #convert sigma and gamma arrays to tensors and get the values at the corresponding time points
@@ -138,13 +154,11 @@ def ode_loss(model, t, params, T_max, epsilon, causal = False):
     #force of infection term
     Trans = beta * S * I # beta * S * I
 
-    r_S = dSdt + T_max * Trans
-    r_E = dEdt - T_max * (Trans - sigma * E)
-    r_I = dIdt - T_max * (sigma * E - gamma * I)
-    r_R = dRdt - T_max * (gamma * I)
-    r_C_inci = dC_incidt - T_max * (sigma * E)
-
-    loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2 + r_C_inci**2)
+    r_S = dSdt + Trans
+    r_E = dEdt - (Trans - sigma * E)
+    r_I = dIdt - (sigma * E - gamma * I)
+    r_R = dRdt - (gamma * I)
+    loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2)
 
     
     if causal:
@@ -152,7 +166,7 @@ def ode_loss(model, t, params, T_max, epsilon, causal = False):
         #compute number of points
         n_points = past_errors.shape[0]
         cumulative_past_errors = torch.zeros(n_points)
-        cumulative_past_errors[1:] = torch.cumsum(past_errors[:-1], dim =0)
+        cumulative_past_errors[1:] = torch.cumsum(past_errors[:-1], dim = 0)
 
     #weight = exp(-epsilon * cumulative past errors), very small ϵcan prevent the network 
     # from effectively minimizing the latter temporal residuals, a large ϵ value can result in a more difficult optimization problem, because the temporal residuals at earlier times have to decrease to a very small value in order to activate the latter temporal weights
@@ -171,56 +185,29 @@ def ode_loss(model, t, params, T_max, epsilon, causal = False):
 
 #%%
 #Initial condition loss
-def ic_loss(model, ICs, T_max, params):
-    sigma_array, gamma_array = params
-    S0, E0, I0, R0, C_inci0 = ICs
-    
+def ic_loss(model, ICs):
+
+    S0, E0, I0, R0 = ICs
     t0 = torch.tensor([[0.0]], dtype=torch.float32, requires_grad=True)
     out = forward_with_constraints(model, t0)
     
     # Value loss - keep gradients!
-    pred = out[0, : 5]  # S, E, I, R, C_inci at t =0
-    target = torch.tensor([S0, E0, I0, R0, C_inci0], dtype=torch.float32)
-    v_loss =  ((pred - target)**2).mean()
-   
-    # # Derivative loss
-    # ones = torch.ones(1)
-    # dSdt = grad.grad(out[:,0], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
-    # dEdt = grad.grad(out[:,1], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
-    # dIdt = grad.grad(out[:,2], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
-    # dRdt = grad.grad(out[:,3], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
-    # dC_incidt = grad.grad(out[:,4], t0, grad_outputs=ones, create_graph=True)[0].squeeze()
-    
-    # #get sigma and gamma at t=0
-    # sigma = torch.tensor(sigma_array[0], dtype=torch.float32)
-    # gamma = torch.tensor(gamma_array[0], dtype=torch.float32)
-    # Trans = out[0,5] * S0 * I0 # beta * S * I at t=0
-   
-    # r_S = dSdt +  T_max * Trans
-    # r_E = dEdt -  T_max * (Trans - sigma * E0)
-    # r_I = dIdt - T_max * (sigma * E0 - gamma * I0)
-    # r_R = dRdt - T_max * (gamma * I0)
-    # r_C_inci = dC_incidt - T_max * (sigma * E0)
-   
-    # d_loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2 + r_C_inci**2).mean()
-   
+    pred = out[0, : 4]  # S, E, I, R at t =0
+    target = torch.tensor([S0, E0, I0, R0], dtype=torch.float32)
+    v_loss = ((pred - target)**2).mean()
     return v_loss
 
 #%%
 # data loss
-def data_loss(model, t_np, I_obs):
-   
-    indices = np.arange(0, len(t_np), 7) # every 7th point to reduce computational load, can adjust as needed
+def data_loss(model, t_np, I_obs, sigma_array):
+    t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+    observed = torch.tensor(I_obs, dtype=torch.float32)
     
-    t_k = torch.tensor(t_np[indices].reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-    cum_obs = torch.tensor(np.cumsum(I_obs)[indices], dtype=torch.float32)
-   
     out = forward_with_constraints(model, t_k)
-    C_inci = out[:, 4]
-    
-    # v loss (cumulative)
-    v_loss = ((C_inci - cum_obs) ** 2).mean()
-    
+    E = out[:, 1]
+    sigma = torch.tensor(sigma_array, dtype=torch.float32)
+    pred_inci = sigma * E
+    v_loss = torch.mean((pred_inci - observed) **2)
     return v_loss
 
 #%%
@@ -228,15 +215,15 @@ def data_loss(model, t_np, I_obs):
 def time_to_train():
     cases = get_canada_data()
     total_days = len(cases)
-    t_np_full = np.linspace(0, 1, total_days, dtype=np.float32)
+    t_np_full = np.linspace(0, total_days, total_days, dtype=np.float32)
     t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
     return t_np_full, t_full, total_days
 #%%
 #Train model
-def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save = False, model_name = 'pinn_model'):
+def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
-    N = 10000
-    ICs = [(N-2)/N, 0/N, 0.0, 2/N, 0.0] # no covid cases at the start, seed with 1 or 2 or 10
+    N = 100000
+    ICs = [(N-2)/N, 0/N, 2/N, 0/N] # no covid cases at the start, seed with 1 or 2 or 10
     t_np_full, t_full, total_days = time_to_train()
     cases = get_canada_data()
     Ir_obs = cases / N # convert cases to a proportion
@@ -244,9 +231,6 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save 
     # Split into train and test
     train_days = total_days - test_days
     train_indices = np.arange(0, train_days)
-
-    # Use TOTAL days for T_max
-    T_max = float(total_days)
     
     # Training time tensor (only training points)
     t_train_np = t_np_full[train_indices] # training time
@@ -260,38 +244,31 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save 
 
     # Create model
     model = create_model()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
     
     #weights for different loss compartments
     def get_weights(ep):
-    # gradually increase importance of data
-      w_ic = min(500, 100 + 0.02 * ep)
-      w_ode = 1 + 0.001 * ep
-      w_data = 10 + 0.05 * ep
-    
-      return w_ic, w_ode, w_data
+        w_ic = 100  
+        w_ode = 1.0  # Keep ODE weight constant
+        w_data = 10 + 0.5 * ep  # Higher starting weight
+        return w_ic, w_ode, w_data
 
-    print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'CEIC':>12} {'Total':>12}  S_range       beta_range")
+    print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'data':>12} {'Total':>12}  S_range       beta_range")
    
     history = []
     for ep in range(epochs):
         w_ic , w_ode, w_data = get_weights(ep)
         optimizer.zero_grad() #reset any previous gradients
-       
-        # IC loss (at t=0)
-        l_ic = ic_loss(model, ICs, T_max, params)
+        
+        l_ic = ic_loss(model, ICs)
+        l_data = data_loss(model, t_train_np, Ir_train, sigma_array[train_indices])
 
-        # Data loss - Only on training points
-        l_data = data_loss(model, t_train_np, Ir_train)
-       
-       #ODE loss
         if causal:
-            l_ode = ode_loss(model, t_train_tensor, params, T_max, epsilon= epsilon, causal= True)
+            l_ode = ode_loss(model, t_train_tensor, params, epsilon=epsilon, causal=True)
         else:
-            l_ode = ode_loss(model, t_train_tensor, params, T_max, epsilon = epsilon, causal = False)
+            l_ode = ode_loss(model, t_train_tensor, params, epsilon=0.0, causal=False)
 
-        # Combined loss - Adjusted weights
-        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data 
+        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data
         loss.backward()
         
         # Gradient clipping
@@ -308,7 +285,7 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save 
             with torch.no_grad():
                 out = forward_with_constraints(model, t_full)
                 s_range = f"[{out[:,0].min():.4f}, {out[:,0].max():.4f}]"
-                b_range = f"[{out[:,5].min():.3f}, {out[:,5].max():.3f}]"
+                b_range = f"[{out[:,4].min():.3f}, {out[:,4].max():.3f}]"
             print(f"{ep:} {l_ic.item():} {l_ode.item():} {l_data.item():} "
                   f"{loss.item():}  {s_range}  {b_range}")
     if save: 
@@ -318,13 +295,17 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 5.0, save 
 #%%
 #Plot
 def plot_all(model, train_days,t_full):
+    N = 100000
     t_np_full, t_full, total_days = time_to_train()
     cases = get_canada_data()
     days = np.arange(total_days)
+
+    sigma_array, gamma_array = get_parama(total_days)
    
     # Convert cases to numpy
     cases_np = np.array(cases)
-    Ic_obs   = np.cumsum(cases_np)
+    #Ic_obs   = np.cumsum(cases_np)
+    Ic_obs = cases_np
    
     # Model prediction
     with torch.no_grad():
@@ -334,8 +315,8 @@ def plot_all(model, train_days,t_full):
     E = out[:, 1] * N
     I = out[:, 2] * N
     R = out[:, 3] * N
-    C_inci = out[:, 4] * N
-    beta = out[:, 5]
+    beta = out[:, 4]
+    pred_inci = sigma_array * E
    
   # 1. Training History
     """plt.figure(figsize=(10, 4))
@@ -350,16 +331,16 @@ def plot_all(model, train_days,t_full):
 
     #  Cumulative cases
     plt.figure(figsize=(12, 5))
-    plt.plot(days, C_inci, 'b-', label='PINN Prediction (Cr)', linewidth=2)
+    plt.plot(days, pred_inci, 'b-', label='PINN Prediction', linewidth=2)
     plt.plot(days[:train_days], Ic_obs[:train_days], 'g.', label='Training Data', markersize=3)
     plt.plot(days[train_days:], Ic_obs[train_days:], 'r.', label='Test Data', markersize=3)
     plt.axvline(train_days, color='k', linestyle='--', alpha=0.5, label='Train/Test Split')
     plt.xlabel('Days')
-    plt.ylabel('Cumulative Reported Cases')
-    plt.title('PINN Cr vs Cumulative Observed Data')
+    plt.ylabel('daily Reported Cases')
+    plt.title('PINN Cr vs daily Observed Data')
     plt.legend()
     plt.grid(True)
-    plt.savefig("reported_cumulative_cases_split.png")
+    plt.savefig("reported_daily_cases_split.png")
     plt.close()
    
     # All Compartments
@@ -403,10 +384,10 @@ def plot_all(model, train_days,t_full):
     plt.grid(True)
 
     plt.subplot(2, 3, 6)
-    plt.plot(days, C_inci/1e3)
-    plt.title(f'Cumulative Incidence (final: {C_inci[-1]/1e3:.1f}k)')
+    plt.plot(days, pred_inci/1e3)
+    plt.title(f'Daily Incidence (final: {pred_inci[-1]/1e3:.1f}k)')
     plt.xlabel('Days')
-    plt.ylabel('cumulative cases (thousands)')
+    plt.ylabel('daily cases (thousands)')
     plt.grid(True)
     plt.savefig("all_plots.png")
     plt.close()
@@ -415,7 +396,7 @@ def plot_all(model, train_days,t_full):
 def R_eff(out, params):
     sigma, gamma = params
     S    = out[:, 0]   # proportion, no need to multiply by N
-    beta = out[:, 5]
+    beta = out[:, 4]
     return (beta * S) / gamma   # dimensionless
 
 #Cori et al. (2013) framework used in EpiEstim, 
@@ -514,31 +495,35 @@ def model_comparison(model1, model2, t):
     t_np_full, t_full, total_days = time_to_train()
     cases = get_canada_data()
     days = np.arange(total_days)
-    N = 10000
+    N = 100000
     sigma_array, gamma_array = get_parama(total_days)
 
     with torch.no_grad():
         out1 = forward_with_constraints(model1, t).numpy()
         out2 = forward_with_constraints(model2, t).numpy()
+
+        # Calculate daily predictions
+        daily_pred1 = sigma_array * out1[:, 1] * N  # sigma * E * N
+        daily_pred2 = sigma_array * out2[:, 1] * N
     #daily cases and cumulative cases comparison
     plt.figure(figsize=(14, 8))
     plt.subplot(1, 2, 1)
-    plt.plot(t_np_full, out1[:, 4] * N, label = 'simple PINN')
-    plt.plot(t_np_full, out2[:, 4] * N, label = 'CEIC PINN')
-    plt.plot(t_np_full, np.cumsum(cases), label = 'observed')
-    plt.title('Cumulative Cases Comparison')
+    plt.plot(t_np_full, daily_pred1, label = 'simple PINN')
+    plt.plot(t_np_full, daily_pred2, label = 'CEIC PINN')
+    plt.plot(t_np_full, cases, label = 'observed')
+    plt.title('daily Cases Comparison')
     plt.xlabel('Days')
-    plt.ylabel('Cumulative Cases')
+    plt.ylabel('daily Cases')
     plt.legend()
     plt.grid(True)
 
     plt.subplot(1, 2, 2)
-    plt.plot(t_np_full[1:], np.diff(out1[:, 4] * N), label = 'simple PINN')
-    plt.plot(t_np_full[1:], np.diff(out2[:, 4] * N), label = 'CEIC PINN')
-    plt.plot(t_np_full[1:], cases[1:], label = 'observed')
-    plt.title('Daily Cases Comparison')
+    plt.plot(t_np_full, np.cumsum(daily_pred1), label = 'simple PINN')
+    plt.plot(t_np_full, np.cumsum(daily_pred2), label = 'CEIC PINN')
+    plt.plot(t_np_full, np.cumsum(cases), label = 'observed')
+    plt.title('cumulative Cases Comparison')
     plt.xlabel('Days')
-    plt.ylabel('Daily Cases')
+    plt.ylabel('Cumulative Cases')
     plt.legend()
     plt.grid(True)
     plt.savefig("model_comparison_simple_CEIC.png")
@@ -551,8 +536,8 @@ def model_comparison(model1, model2, t):
     
 
     plt.figure(figsize=(14, 8))
-    plt.plot(t_np_full, out1[:, 5], label = 'simple PINN')
-    plt.plot(t_np_full, out2[:, 5], label = "CEIC PINN")
+    plt.plot(t_np_full, out1[:, 4], label = 'simple PINN')
+    plt.plot(t_np_full, out2[:, 4], label = "CEIC PINN")
     plt.title('Beta Comparison')
     plt.xlabel('Days')
     plt.ylabel('Beta')
@@ -577,9 +562,9 @@ def model_comparison(model1, model2, t):
 #Validation metrics table
     print(f"Validation Metrics (last 65 days):")
     print(f"{'Metric':<12} {'CEIC PINN':>18} {'Simple PINN':>18}")
-    pred_test1 = out1[total_days - 65:, 4] * N
-    pred_test2 = out2[total_days - 65:, 4] * N
-    obs_test = np.cumsum(cases)[total_days - 65:total_days]
+    pred_test1 = daily_pred1[total_days - 65 : total_days]
+    pred_test2 = daily_pred2[total_days - 65 : total_days]
+    obs_test = np.array(cases)[total_days - 65 : total_days]
     mse1 = np.mean((pred_test1 - obs_test) ** 2)
     mse2 = np.mean((pred_test2 - obs_test) ** 2)
     mae1 = np.mean(np.abs(pred_test1 - obs_test))
@@ -600,7 +585,7 @@ def load_model(path):
 #%%
 #Run everything
 if __name__ == "__main__":
-    N= 10000
+    N= 100000
     num_runs = 1
     #store errors for each run
     simple_error = []
@@ -613,17 +598,17 @@ if __name__ == "__main__":
     for run in range(num_runs):
         t_np_full, t_full, total_days = time_to_train()
         cases = get_canada_data()
-
- 
         params = get_parama(total_days)
+        sigma_array, gamma_array = params
         print("RUN:", run +1)
         #set_seed(run)
+        
         print("Training simple PINN__")
         model_simple, history_s, train_days = train_model(epochs = 5000, test_days= 65, causal= False,
-                                                         epsilon= 3, save = True, model_name= f"simple_pinn_run_{run+1}")
+                                                         epsilon = 3, save = True, model_name= f"simple_pinn_run_{run+1}")
         print("Training CEIC PINN__")
         model_ceic, history_c, train_days = train_model(epochs= 5000, test_days= 65, causal = True,
-                                                       epsilon= 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
+                                                       epsilon = 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
 
         #load model
         # model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
@@ -633,89 +618,35 @@ if __name__ == "__main__":
             out_ceic = forward_with_constraints(model= model_ceic, t = t_full).numpy()
 
             #predictions
-            pred_simple_C_inci = out_simple[:, 4] * N
-            pred_ceic_C_inci = out_ceic[:, 4] * N
-            observed_C_inci = np.cumsum(cases)
+            pred_simple_daily_inci = sigma_array * out_simple[:, 1] * N
+            pred_ceic_daily_inci = sigma_array * out_ceic[:, 1] * N
+            observed_daily_inci = cases
 
-            #calculate error on the test set
-            test_pred_simple_C_inci = pred_simple_C_inci[-65:]
-            test_pred_CEIC_C_inci = pred_ceic_C_inci[-65:]
-            test_observed_C_inci = observed_C_inci[-65:]
-
-            mse_simple = np.mean((test_pred_simple_C_inci - test_observed_C_inci) ** 2)
-            mse_ceic = np.mean((test_pred_CEIC_C_inci - test_observed_C_inci) ** 2)
-
-            simple_error.append(mse_simple)
-            ceic_error.append(mse_ceic)
-
-
-            beta_simple = out_simple[:, 5]  # beta is column 5
-            beta_ceic   = out_ceic[:, 5]
+            beta_simple = out_simple[:, 4]  # beta is column 4
+            beta_ceic   = out_ceic[:, 4]
 
             all_beta_simple.append(beta_simple)
             all_beta_ceic.append(beta_ceic)
 
-            #summary
-            print(f"RUN {run +1} : Simple PINN MSE: {mse_simple: .3f}, CEIC PINN MSE: {mse_ceic: .3f}")
-
-            #simple_pinn statistics
-            simple_mean_error = np.mean(simple_error)
-            simple_std_error = np.std(simple_error)
-            simple_max_error = np.max(simple_error)
-            simple_min_error = np.min(simple_error)
-            simple_CI_error = (simple_mean_error - 1.96 * simple_std_error / np.sqrt(num_runs), 
-                                simple_mean_error + 1.96 * simple_std_error / np.sqrt(num_runs))
-            print(f"Simple PINN MSE - Mean: {simple_mean_error:.3f}, Std: {simple_std_error:.3f}, Max: {simple_max_error:.3f}, Min: {simple_min_error:.3f}, 95% CI: ({simple_CI_error[0]:.3f}, {simple_CI_error[1]:.3f})")
-
-            #CEIC_pinn statistics
-            ceic_mean_error = np.mean(ceic_error)
-            ceic_std_error = np.std(ceic_error)
-            ceic_max_error = np.max(ceic_error)
-            ceic_min_error = np.min(ceic_error)
-            ceic_CI_error = (ceic_mean_error - 1.96 * ceic_std_error / np.sqrt(num_runs), 
-                                ceic_mean_error + 1.96 * ceic_std_error / np.sqrt(num_runs))
-            print(f"CEIC PINN MSE - Mean: {ceic_mean_error:.3f}, Std: {ceic_std_error:.3f}, Max: {ceic_max_error:.3f}, Min: {ceic_min_error:.3f}, 95% CI: ({ceic_CI_error[0]:.3f}, {ceic_CI_error[1]:.3f})")
-            
-            #paired t_test to compare the two models across runs
-            t_stat, p_value = ttest_rel(simple_error, ceic_error)
-            print(f"Paired t-test: t-statistic = {t_stat:.3f}, p-value = {p_value:.3f}")
-
-
-            #boxplot comparison
-            plt.figure(figsize=(8, 6))
-            plt.boxplot([simple_error, ceic_error], tick_labels = ['Simple PINN', 'CEIC PINN'])
-            plt.ylabel('MSE')
-            plt.title('Comparison of Simple PINN and CEIC PINN')
-            plt.grid(True)
-            plt.savefig("model_comparison_boxplot.png")
-            plt.close()
-           #95% confidence interval bar_chart
-           #yerr in bar chart means the error bars, which represent the variability of the data, in this case, the confidence interval for the mean MSE of each model. The error bars will extend from the mean value to the upper and lower bounds of the confidence interval, visually showing the range within which we can be 95% confident that the true mean MSE lies for each model.
-            plt.figure(figsize=(8, 6))
-            plt.bar(['Simple PINN', 'CEIC PINN'], [simple_mean_error, ceic_mean_error], yerr=[simple_CI_error, ceic_CI_error])
-            plt.ylabel('Mean MSE')
-            plt.title('95% Confidence Interval of MSE')
-            plt.grid(True)
-            plt.savefig("model_comparison_barplot.png")
-            plt.close()
-            #plot_R_t_comparison(out_ceic, cases, params, CANADA_VARIANTS, data_start_date = datetime.datetime(2020, 1, 23))
-            #plot_all(model_ceic, train_days, t_full)
-            model_comparison(model_simple, model_ceic, t_full)
+        model_comparison(model_simple, model_ceic, t_full)
 
             #calling observed beta
-            true_beta = data_gen.seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0)(t_np_full)
-            #plot beta variability across runs for just CEIC and true beta
-            plt.figure(figsize=(14, 8))
-            for beta in all_beta_ceic:
-                plt.plot(t_np_full, beta, label = 'CEIC PINN', color = 'blue')
-                plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
-            plt.title('Beta Variability Across Runs (CEIC PINN)')
-            plt.xlabel('Days')
-            plt.ylabel('Beta')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig("beta_variability_ceic.png")
-            plt.close()
+        #true_beta = data_gen.seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0)(t_np_full)
+        true_beta = data_gen.piecewise_beta([0.1, 0.15, 0.25, 0.3, 0.4], [60,120, 240, 300])(t_np_full)
+        #plot beta variability across runs for CEIC and true beta and simple PINN
+        plt.figure(figsize=(14, 8))
+        for i, beta in enumerate(all_beta_ceic):
+            plt.plot(t_np_full, beta, color='blue', label='CEIC PINN' if i == 0 else "")
+        for i, beta in enumerate(all_beta_simple):
+            plt.plot(t_np_full, beta, color='green', label='Simple PINN' if i == 0 else "")
+        plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
+        plt.title('Beta Variability Across Runs (CEIC PINN)')
+        plt.xlabel('Days')
+        plt.ylabel('Beta')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("beta_variability_ceic_and_simple.png")
+        plt.close()
 
             
 
