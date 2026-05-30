@@ -98,10 +98,10 @@ def get_parama(total_days):
 #PINN model
 def create_model():
     model = nn.Sequential(
-        nn.Linear(1, 64), nn.Tanh(),
-        nn.Linear(64, 64), nn.Tanh(),
-        nn.Linear(64, 64), nn.Tanh(),
-        nn.Linear(64, 5)
+        nn.Linear(1, 96), nn.Tanh(),
+        nn.Linear(96, 96), nn.Tanh(),
+        nn.Linear(96, 96), nn.Tanh(),
+        nn.Linear(96, 5)
     )
     return model
 
@@ -140,13 +140,16 @@ def ode_loss(model, t, params, epsilon, causal = False):
     beta = out[:, 4]
 
    #creates a tensor of all 1's same shape as S, need this to combine gradients from multiple outputs
-    ones = torch.ones_like(S)
+    ones = torch.ones_like(S) #compute derivative for each point independently. 
+    #If E = [E1, E2, E3, ...] (vector)
+    #grad_outputs = [v1, v2, v3, ...]
+    #Then result = v1 * ∂E1/∂t + v2 * ∂E2/∂t + v3 * ∂E3/∂t + ...
     #create_graph= True, because we need derivative of a derivative otherwise the term would consider as a constant
    
-    dSdt = grad.grad(S, t, grad_outputs=ones, create_graph=True)[0].squeeze()
-    dEdt = grad.grad(E, t, grad_outputs=ones, create_graph=True)[0].squeeze()
-    dIdt = grad.grad(I, t, grad_outputs=ones, create_graph=True)[0].squeeze()
-    dRdt = grad.grad(R, t, grad_outputs=ones, create_graph=True)[0].squeeze()
+    dSdt = grad.grad(S, t, grad_outputs=ones, retain_graph= True)[0].squeeze()
+    dEdt = grad.grad(E, t, grad_outputs=ones, retain_graph= True)[0].squeeze()
+    dIdt = grad.grad(I, t, grad_outputs=ones, retain_graph= True)[0].squeeze()
+    dRdt = grad.grad(R, t, grad_outputs=ones, retain_graph= True)[0].squeeze()
    
     #convert sigma and gamma arrays to tensors and get the values at the corresponding time points
     sigma = torch.tensor(sigma_array, dtype=torch.float32)
@@ -211,11 +214,10 @@ def data_loss(model, t_np, I_obs, sigma_array):
     I = out[:, 2]
     beta = out [:, 4]
     sigma = torch.tensor(sigma_array, dtype=torch.float32)
-    C = sigma * E 
     # dEdT = beta S I - C
     # C = dEdT - beta S I 
     ones = torch.ones_like(E)
-    dEdt = grad.grad(E, t_k, grad_outputs=ones, create_graph=True)[0].squeeze()
+    dEdt = grad.grad(E, t_k, grad_outputs=ones, retain_graph= True)[0].squeeze()
     C =  beta * S * I - dEdt
 
     v_loss = torch.mean((C - observed) **2)
@@ -235,10 +237,10 @@ def time_to_train():
 def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
     N = 100000
-    ICs = [(N-2)/N, 0/N, 2/N, 0/N] # no covid cases at the start, seed with 1 or 2 or 10
+    ICs = [(N-2)/N, 0, 2/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
     t_np_full, t_full, total_days = time_to_train()
     cases = get_canada_data()
-    Ir_obs = cases / N # convert cases to a proportion
+    Ir_obs = cases /N # convert cases to a proportion
     
     # Split into train and test
     train_days = total_days - test_days
@@ -259,14 +261,26 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
 
     # Create model
     model = create_model()
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    #weights for different loss compartments
+    #weights for different loss compartments in different phases
+    # def get_weights(ep):
+    #     if ep < 5000:
+    #         w_ic, w_ode, w_data = 10.0, 1.0, 0.0
+    #     elif ep <15000:
+    #         w_ic, w_ode, w_data = 10.0, 1.0, 1
+
+    #     else:
+    #         w_ic, w_ode, w_data = 10.0, 1.0, 10.0
+    #     return w_ic, w_ode, w_data
+
     def get_weights(ep):
-        w_ic = 100  
-        w_ode = 1.0  # Keep ODE weight constant
-        w_data = 1000   #
+        w_ic   = 1.0
+        w_ode  = 1.0
+        w_data = 10.0
         return w_ic, w_ode, w_data
+
+    
 
     print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'data':>12} {'Total':>12}  S_range       beta_range")
    
@@ -291,6 +305,7 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
         #we need this to be safe from exploding gradient
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        #scheduler.step()
        
         history.append(loss.item()) #loss is a tensor with attached graph, it remembers how it was computed,
         #takes lot of memory, we need to convert it to a scalar value so 
@@ -305,7 +320,23 @@ def train_model(epochs=40000, test_days=65, causal = False, epsilon = 3, save = 
                   f"{loss.item():}  {s_range}  {b_range}")
     if save: 
         torch.save(model.state_dict(), f"{model_name}.pth") 
-    return model, history, train_days, C
+    return model, history, train_days
+
+#save C for later use
+def compute_C_save(model, t_tensor, sigma_array, N, filename ):
+    out = forward_with_constraints(model, t_tensor)
+    S = out[:, 0]
+    E = out[:, 1]
+    I = out[:, 2]
+    R = out[:, 3]
+    beta = out[:, 4]
+    ones  = torch.ones_like(S)
+    dEdt  = grad.grad(E, t_tensor, grad_outputs=ones, retain_graph=True)[0].squeeze()
+    sigma = torch.tensor(sigma_array, dtype=torch.float32)
+    C = beta * S * I - dEdt
+    C_np = C.detach().numpy()
+    np.save(filename, C_np)
+    return C_np
 
 #%%
 #Plot
@@ -601,7 +632,7 @@ def load_model(path):
 #Run everything
 if __name__ == "__main__":
     N= 100000
-    num_runs = 1
+    num_runs = 5
     #store errors for each run
     simple_error = []
     ceic_error = []
@@ -609,25 +640,34 @@ if __name__ == "__main__":
     #store beta for each run to see the variability across runs
     all_beta_simple = []
     all_beta_ceic = []
+
+    all_C_simple = []
+    all_C_ceic = []
     
     for run in range(num_runs):
         t_np_full, t_full, total_days = time_to_train()
+        t_full_grad = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+
         cases = get_canada_data()
         params = get_parama(total_days)
         sigma_array, gamma_array = params
         print("RUN:", run +1)
         #set_seed(run)
         
-        print("Training simple PINN__")
-        model_simple, history_s, train_days, C_simple = train_model(epochs = 20000, test_days= 65, causal= False,
-                                                         epsilon = 3, save = True, model_name= f"simple_pinn_run_{run+1}")
-        print("Training CEIC PINN__")
-        model_ceic, history_c, train_days, C_ceic = train_model(epochs= 20000, test_days= 65, causal = True,
-                                                       epsilon = 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
-
+        # print("Training simple PINN__")
+        # model_simple, history_s, train_days = train_model(epochs = 20000, test_days= 65, causal= False,
+        #                                                  epsilon = 3, save = True, model_name= f"simple_pinn_run_{run+1}")
+        # print("Training CEIC PINN__")
+        # model_ceic, history_c, train_days = train_model(epochs= 20000, test_days= 65, causal = True,
+        #                                                epsilon = 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
+        # C_simple = compute_C_save(model_simple, t_full_grad, sigma_array, N, f"C_simple_run_{run+1}.npy")
+        # C_ceic = compute_C_save(model_ceic,   t_full_grad, sigma_array, N, f"C_ceic_run_{run+1}.npy")
         #load model
-        # model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
-        # model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
+        model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
+        model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
+        C_simple = np.load(f"C_simple_run_{run+1}.npy")
+        C_ceic = np.load(f"C_ceic_run_{run+1}.npy")
+
         with torch.no_grad():
             out_simple = forward_with_constraints(model= model_simple, t = t_full).numpy()
             out_ceic = forward_with_constraints(model= model_ceic, t = t_full).numpy()
@@ -638,6 +678,9 @@ if __name__ == "__main__":
             all_beta_simple.append(beta_simple)
             all_beta_ceic.append(beta_ceic)
 
+            all_C_simple.append(C_simple)
+            all_C_ceic.append(C_ceic)
+            
         #model_comparison(model_simple, model_ceic, t_full)
 
             #calling observed beta
@@ -646,17 +689,44 @@ if __name__ == "__main__":
         #plot beta variability across runs for CEIC and true beta and simple PINN
         plt.figure(figsize=(14, 8))
         for i, beta in enumerate(all_beta_ceic):
-            plt.plot(t_np_full, beta, color='blue', label='CEIC PINN' if i == 0 else "")
-        for i, beta in enumerate(all_beta_simple):
-            plt.plot(t_np_full, beta, color='green', label='Simple PINN' if i == 0 else "")
+            plt.plot(t_np_full, beta, color='blue', label='CEIC PINN')
         plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
-        plt.title('Beta Variability Across Runs (CEIC PINN)')
+        plt.title('Beta Variability Across Runs')
         plt.xlabel('Days')
         plt.ylabel('Beta')
         plt.legend()
-        plt.grid(True)
-        plt.savefig("beta_variability_ceic_and_simple.png")
+        plt.savefig("beta_variability_and_ceic.png")
         plt.close()
+
+        plt.figure(figsize=(14, 8))
+        for i, beta in enumerate(all_beta_simple):
+            plt.plot(t_np_full, beta, color='green', label='Simple PINN')
+        plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
+        plt.legend()
+        plt.xlabel('Days')
+        plt.ylabel('Beta')
+        plt.savefig("beta_variability_and-simple.png")
+        plt.close()
+
+        #plot the observed data with simple and ceic prediction
+        plt.figure(figsize=(14, 8))
+        for i, C_simple in enumerate(all_C_simple):
+            plt.plot(t_np_full, C_simple * N, label = 'simple pinn', color = 'orange')
+        plt.plot(t_np_full, cases, label = 'observed', color = 'green')
+        plt.legend()
+        plt.savefig("comparison of Observed data , simple")
+        plt.close()
+
+        plt.figure(figsize=(14, 8))
+        for i, C_ceic in enumerate(all_C_ceic):
+            plt.plot(t_np_full, C_simple * N, label = 'ceic pinn', color = 'blue')
+        plt.plot(t_np_full, cases, label = 'observed', color = 'green')
+        plt.legend()
+        plt.savefig("comparison of Observed data , ceic")
+        plt.close()
+        
+
+        
 
 
             
