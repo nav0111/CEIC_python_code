@@ -1,6 +1,10 @@
 # Generate synthetic data for testing and development purposes 
 # Task is to write the relevant functions that generate incidence curves
 # from SEIR model and then add noise to it
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+
 
 # Your SEIR model should include a time-dependent beta function
 # Let's do 5 different scenarios for beta(t):
@@ -27,14 +31,12 @@
 # - Negative Binomial: Yₜ ∣ μₜ ~ NegBin(μₜ, φ),   Var(Yₜ) = μₜ + μₜ²/φ
 #  try with different values of φ (say 3 - 5) or φ = 20 for overdispersion
 
+# run this in a cell for interactivity. 
+# %reload_ext autoreload
+# %autoreload 2
+
 #%%
 #generate incidence data from cumulative cases
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.integrate import solve_ivp
-
-#rng = np.random.default_rng(seed=627)
-
 def seir_model(t, y, beta_func, sigma, gamma, omega = 0.0):
     S, E, I, R, C = y
     N = S + E + I + R
@@ -127,6 +129,8 @@ def calculate_rt(t_arr, beta_func, susc_arr, N, gamma):
         R_t.append(beta_func(t) / gamma * susc_arr[t] / N) 
     return R_t
 
+#%% 
+# generate data with defaults
 def generate_data_with_defaults(beta_func): 
     # function creates a panel of all the scenarios 
     t = np.arange(730) 
@@ -139,7 +143,7 @@ def generate_data_with_defaults(beta_func):
     sigma, gamma, omega = 1/5.2, 1/10, 1/60 # no waning immunity for now, so omega = 0.0
     _, _, _, _, _, Z = gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
     return Z
-    
+
 if __name__ == "__main__":
     # code that will run when we execute this file directly, 
     # but not when we import it as a module in another file.
@@ -162,17 +166,7 @@ if __name__ == "__main__":
     print(f"final size: {data3.sum()}")
     print(f"final size: {data4.sum()}")
     print(f"final size: {data5.sum()}")
-    # plt.figure(figsize=(14, 8))
-    # plt.subplot(1,2,1)
-    # data = generate_data_with_defaults(type)
-    # plt.plot(data, label = 'incidence')
-    # plt.legend()
-    # plt.subplot(1,2,2)
-    # plt.plot(sigmoid_beta(beta_low=0.10, beta_high=0.18, k=0.02, t0=180)(np.arange(1500)), label ='beta')
-    # plt.legend()
-    # plt.savefig("observed incidence_curve.png")
-    # plt.close()
-
+    
     plt.figure(figsize=(16, 10))
     plt.subplot(2, 5, 1)
     plt.plot(data1, label = 'constant beta')
@@ -195,7 +189,8 @@ if __name__ == "__main__":
     plt.legend()
 
     plt.subplot(2, 5, 6)
-    plt.plot(beta_fn1(np.arange(730)), label = 'constant beta')
+    beta_val = [beta_fn1(x) for x in range(730)]
+    plt.plot(beta_val, label = 'constant beta')
     plt.legend()
 
     plt.subplot(2, 5, 7)
@@ -214,19 +209,6 @@ if __name__ == "__main__":
     plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
     plt.legend()
     plt.savefig('Five_incidence_curves.png')
-    plt.close()
-
-    #print(beta_fn2(np.arange(730)))
-    #beta value array
-    beta_val = []
-    # for i in range(730):
-    #     beta1 = beta_fn1(i)
-    #     beta_val.append(beta1)
-    #     #print(beta_val)
-    beta_val = [beta_fn1(x) for x in range(730)]
-    print(beta_val)    
-    plt.plot(beta_val)
-    plt.savefig('beta_fn1.png')
     plt.close()
 
     
