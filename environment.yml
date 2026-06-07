@@ -1,6 +1,7 @@
 name: pinns
 channels:
   - pytorch
+  - nvidia
   - defaults
 dependencies:
   - python=3.10
@@ -10,9 +11,6 @@ dependencies:
   - pytorch
   - torchvision
   - torchaudio
-  - cpuonly
-  - intel-openmp
-  - mkl
-  - mkl-service
+  - pytorch-cuda=12.1
   - ipykernel
   - scipy
