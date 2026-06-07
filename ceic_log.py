@@ -215,7 +215,7 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
         optimizer.zero_grad() #reset any previous gradients
 
         l_ic = ic_loss(model, ICs)
-        l_data = data_loss(model, t_data_np, Ir_obs, sigma_array)
+        l_data = data_loss(model, t_data_np, Ir_obs)
         if causal:
             l_ode = ode_loss(model, t_colloc_tensor, epsilon=epsilon, causal=True)
         else:
