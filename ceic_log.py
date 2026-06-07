@@ -50,8 +50,7 @@ def forward_with_constraints(model, t):
     beta = F.softplus(raw[:, 4:5])
     return torch.cat([S, E, I, R, beta], dim=1)
 
-def ode_loss(model, t, params, epsilon, causal = False):
-    sigma_array, gamma_array, omega_array = params
+def ode_loss(model, t, epsilon, causal = False):
     out = forward_with_constraints(model, t)
    
     # the output of the neural network at time t
@@ -199,9 +198,6 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
     # if t_train_np (or t_train_tensor) is used to evaluate the model
     # how do you determine data loss? 
 
-    #time_varying parameters for the variants
-    sigma_array, gamma_array, omega_array = get_parama(total_days)
-    params = sigma_array, gamma_array, omega_array
     # Create model
     model = create_model()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -221,9 +217,9 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
         l_ic = ic_loss(model, ICs)
         l_data = data_loss(model, t_data_np, Ir_obs, sigma_array)
         if causal:
-            l_ode = ode_loss(model, t_colloc_tensor, params, epsilon=epsilon, causal=True)
+            l_ode = ode_loss(model, t_colloc_tensor, epsilon=epsilon, causal=True)
         else:
-            l_ode = ode_loss(model, t_colloc_tensor, params, epsilon=0.0, causal=False)
+            l_ode = ode_loss(model, t_colloc_tensor, epsilon=0.0, causal=False)
 
         loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data
         loss.backward()
