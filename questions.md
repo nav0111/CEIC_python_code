@@ -20,9 +20,9 @@ reference: https://docs.pytorch.org/tutorials/beginner/introyt/tensors_deeper_tu
 
 https://www.geeksforgeeks.org/python/tensors-in-pytorch/
 
-2. What does the function `np.full()` do? 
+1. What does the function `np.full()` do? 
 
-3. Understanding AD on tensors. 
+1. Understanding AD on tensors. 
 ```
 x = torch.tensor(3.0, requires_grad=True)
 y = x * 2
@@ -125,3 +125,6 @@ y.backward()
 y.backward()
 ```
 
+1. Can you explain why `tanh` is used? I undersstand it's an infinitely differentiable function, and that RelU has a kink in it (plus zero second derivative). Is it because in the PINN we are taking the derivative of the NN twice with respect to the weights/biases and also time? Can you find sources/papers which show why RelU fails in PINNs. 
+
+For PINN the requirement is smooth (C^∞ ideally), non-saturating in the active region, derivatives don't vanish under composition. Tanh hits this. There are other candidates that hit it differently.

@@ -144,10 +144,7 @@ def generate_data_with_defaults(beta_func):
     _, _, _, _, _, Z = gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
     return Z
 
-if __name__ == "__main__":
-    # code that will run when we execute this file directly, 
-    # but not when we import it as a module in another file.
-
+def plot_data(): 
     # TO DO : find the reproduction number for each of these, but remember 
     # beta(t) is temporal, so need to find a way to do this -- research this. 
     # need this for your thesis/paper: report beta(t), shape/formula, the incidence curve, R_effective
@@ -166,50 +163,40 @@ if __name__ == "__main__":
     print(f"final size: {data3.sum()}")
     print(f"final size: {data4.sum()}")
     print(f"final size: {data5.sum()}")
-    
+    # code that will run when we execute this file directly, 
+    # but not when we import it as a module in another file.    
     plt.figure(figsize=(16, 10))
     plt.subplot(2, 5, 1)
     plt.plot(data1, label = 'constant beta')
-    plt.legend()
-
     plt.subplot(2, 5, 2)
     plt.plot(data2, label = 'sigmoid beta')
-    plt.legend()
-
     plt.subplot(2, 5, 3)
     plt.plot(data3, label = 'seasonal beta')
-    plt.legend()
-
     plt.subplot(2, 5, 4)
     plt.plot(data4, label = 'piecewise beta')
-    plt.legend()
-
     plt.subplot(2, 5, 5)
     plt.plot(data5, label = 'sawtooth beta')
-    plt.legend()
 
     plt.subplot(2, 5, 6)
     beta_val = [beta_fn1(x) for x in range(730)]
     plt.plot(beta_val, label = 'constant beta')
-    plt.legend()
 
     plt.subplot(2, 5, 7)
     plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
-    plt.legend()
 
     plt.subplot(2, 5, 8)
     plt.plot(beta_fn3(np.arange(730)), label = 'seasonal beta')
-    plt.legend()
 
     plt.subplot(2, 5, 9)
     plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
-    plt.legend()
 
     plt.subplot(2, 5, 10)
     plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
-    plt.legend()
     plt.savefig('Five_incidence_curves.png')
-    plt.close()
+    #plt.close()
+
+if __name__ == "__main__":
+    print("main run.")
 
     
 
