@@ -14,6 +14,9 @@ from scipy.interpolate import interp1d
 import random
 from data_gen import *
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
 def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -105,7 +108,7 @@ def ode_loss(model, t, epsilon, causal = False):
         past_errors = loss.detach()
         #compute number of points
         n_points = past_errors.shape[0]
-        cumulative_past_errors = torch.zeros(n_points)
+        cumulative_past_errors = torch.zeros(n_points, device=device)
         cumulative_past_errors[1:] = torch.cumsum(past_errors[:-1], dim = 0)
 
     #weight = exp(-epsilon * cumulative past errors), very small ϵcan prevent the network 
@@ -125,30 +128,27 @@ def ode_loss(model, t, epsilon, causal = False):
 
 def ic_loss(model, ICs):
     S0, E0, I0, R0 = ICs
-    t0 = torch.tensor([[0.0]], dtype=torch.float32, requires_grad=True)
+    t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
     out = forward_with_constraints(model, t0)
     
     # Value loss - keep gradients!
     pred = out[0, :4]  # selects columns 0, 1, 2, 3, corresponding to S, E, I, R at t =0
-    target = torch.tensor([S0, E0, I0, R0], dtype=torch.float32)
+    target = torch.tensor([S0, E0, I0, R0], dtype=torch.float32, device=device)
     v_loss = ((pred - target)**2).mean()
     return v_loss
 
-def data_loss(model, t_np, I_obs, sigma_array):
-    t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+def data_loss(model, t_np, I_obs):
+    t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
     # observed incidence or cumualtive incidence
-    observed = torch.tensor((I_obs), dtype=torch.float32)
+    observed = torch.tensor((I_obs), dtype=torch.float32, device=device)
     
     # data loss 
     # calculate cumulative incidence from the model 
     out = forward_with_constraints(model, t_k)
     E = out[:, 1]
-    sigma = torch.tensor(sigma_array, dtype=torch.float32)
+    sigma = 1/5.2
     predicted_incidence = sigma * E
     v_loss = torch.mean((predicted_incidence - observed) **2)
-    # ones = torch.ones_like(E)
-    # dEdt = grad.grad(E, t_k, grad_outputs=ones, retain_graph= True)[0].squeeze()
-    # C =  beta * S * I - dEdt
     return v_loss
 
 def conservation_loss(model, t):
@@ -161,16 +161,16 @@ def time_to_train():
     total_days = len(cases)
     #t_np_full = np.linspace(0, total_days, total_days, dtype=np.float32)
     t_np_full = np.arange(total_days, dtype=np.float32)
-    t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+    t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
 
     # Data points (one per day, where observations exist)
     t_data_np = np.arange(total_days, dtype=np.float32)
-    t_data_tensor = torch.tensor(t_data_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+    t_data_tensor = torch.tensor(t_data_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
 
     # Collocation points (denser, for ODE residual)
     n_colloc = 5000  # vs ~720 data points
     t_colloc_np = np.linspace(0, total_days - 1, n_colloc).astype(np.float32)
-    t_colloc_tensor = torch.tensor(t_colloc_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
+    t_colloc_tensor = torch.tensor(t_colloc_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
     return t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days
 
 def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
@@ -199,7 +199,7 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
     # how do you determine data loss? 
 
     # Create model
-    model = create_model()
+    model = create_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     def get_weights(ep):
@@ -248,8 +248,9 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
         torch.save(model.state_dict(), f"{model_name}.pth") 
     return model, history
 
+
 def load_model(path):
-    model = create_model()
+    model = create_model().to(device)
     model.load_state_dict(torch.load(path))
     return model
 
@@ -269,11 +270,11 @@ def plot_model(model):
     #t_np_full, t_full, total_days = time_to_train()
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
-    S = out[:, 0]
-    E = out[:, 1]
-    I = out[:, 2]
-    R = out[:, 3]
-    pred_beta = out[:, 4].numpy()
+    S = out[:, 0].cpu().numpy()
+    E = out[:, 1].cpu().numpy()
+    I = out[:, 2].cpu().numpy()
+    R = out[:, 3].cpu().numpy()
+    pred_beta = out[:, 4].cpu().numpy()
 
     # check model consistency
     total = out[:, :4].sum(dim=1)
