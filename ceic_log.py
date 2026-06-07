@@ -84,10 +84,10 @@ def ode_loss(model, t, epsilon, causal = False):
     # which means we need to be able to do dQ/dtheta, which is d(dS/dt)/dtheta, which is the second derivative of S w.r.t time and parameters.
     # so create_graph creats the computational graph so we can do ode_loss.backward() later on
     # squeeze: giving you a one-dimensional tensor of shape (n_points,) instead of (n_points, 1)
-    dSdt = grad.grad(S, t, grad_outputs=ones, create_graph = True, retain_graph= True)[0].squeeze()
-    dEdt = grad.grad(E, t, grad_outputs=ones, create_graph = True, retain_graph= True)[0].squeeze()
-    dIdt = grad.grad(I, t, grad_outputs=ones, create_graph = True, retain_graph= True)[0].squeeze()
-    dRdt = grad.grad(R, t, grad_outputs=ones, create_graph = True, retain_graph= True)[0].squeeze()
+    dSdt = grad.grad(S, t, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dEdt = grad.grad(E, t, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dIdt = grad.grad(I, t, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dRdt = grad.grad(R, t, grad_outputs=ones, create_graph = True)[0].squeeze()
    
     #convert sigma and gamma arrays to tensors and get the values at the corresponding time points
     sigma = 1/5.2
@@ -126,25 +126,23 @@ def ode_loss(model, t, epsilon, causal = False):
 
     return ode_loss
 
-def ic_loss(model, ICs):
+def ic_loss(model, ICs, t0):
     S0, E0, I0, R0 = ICs
-    t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
+    #t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
     out = forward_with_constraints(model, t0)
-    
-    # Value loss - keep gradients!
     pred = out[0, :4]  # selects columns 0, 1, 2, 3, corresponding to S, E, I, R at t =0
     target = torch.tensor([S0, E0, I0, R0], dtype=torch.float32, device=device)
     v_loss = ((pred - target)**2).mean()
     return v_loss
 
-def data_loss(model, t_np, I_obs):
-    t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
+def data_loss(model, tk, I_obs):
+    # t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
     # observed incidence or cumualtive incidence
     observed = torch.tensor((I_obs), dtype=torch.float32, device=device)
     
     # data loss 
     # calculate cumulative incidence from the model 
-    out = forward_with_constraints(model, t_k)
+    out = forward_with_constraints(model, tk)
     E = out[:, 1]
     sigma = 1/5.2
     predicted_incidence = sigma * E
@@ -180,9 +178,12 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
     cases = get_syn_data()
     Ir_obs = cases / N # convert cases to a proportion
     
-    # get time vector, np and tensor types
+    # get time vector, np and tensor types\
+    # plus a t0 tensor to pass to the IC loss function, 
+    # since it needs to evaluate the model at t=0
     t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days = time_to_train()
-    
+    t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
+
     # # Split into train and test
     # train_days = total_days - test_days
     # train_indices = np.arange(0, train_days)
@@ -214,8 +215,8 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
         w_ic , w_ode, w_data = get_weights(ep)
         optimizer.zero_grad() #reset any previous gradients
 
-        l_ic = ic_loss(model, ICs)
-        l_data = data_loss(model, t_data_np, Ir_obs)
+        l_ic = ic_loss(model, ICs, t0)
+        l_data = data_loss(model, t_data_tensor, Ir_obs)
         if causal:
             l_ode = ode_loss(model, t_colloc_tensor, epsilon=epsilon, causal=True)
         else:
