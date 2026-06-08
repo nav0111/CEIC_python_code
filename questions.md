@@ -128,3 +128,9 @@ y.backward()
 1. Can you explain why `tanh` is used? I undersstand it's an infinitely differentiable function, and that RelU has a kink in it (plus zero second derivative). Is it because in the PINN we are taking the derivative of the NN twice with respect to the weights/biases and also time? Can you find sources/papers which show why RelU fails in PINNs. 
 
 For PINN the requirement is smooth (C^∞ ideally), non-saturating in the active region, derivatives don't vanish under composition. Tanh hits this. There are other candidates that hit it differently.
+
+The initialization of the network really matters for the activation function also. 
+
+Main point: PINNs for inverse problems have many degenerate local minima, and getting out of them requires either good initialization or curriculum learning.  The Wang causality paper sidesteps this issue because they're doing forward PDE problems where the IC is known and the trick of "learn early times first" automatically gives the network something non-trivial to fit.
+
+The PINN being stuck in the degenerate basin has to do with gradient pathways (the softplus problem), initialization basins (β starting at 0.69), and loss balance (data needs to dominate during warmup).

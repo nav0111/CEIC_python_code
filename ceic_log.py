@@ -1,4 +1,6 @@
+from curses import raw
 import datetime
+import itertools
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,6 +15,11 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 import random
 from data_gen import *
+
+print("Torch version:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -47,10 +54,16 @@ def create_model():
 def forward_with_constraints(model, t):
     raw = model(t)
     S = torch.sigmoid(raw[:, 0:1])
-    E = F.softplus(raw[:, 1:2])
-    I = F.softplus(raw[:, 2:3])
-    R = F.softplus(raw[:, 3:4])
-    beta = F.softplus(raw[:, 4:5])
+    #E = F.softplus(raw[:, 1:2] + 2.0)
+    #I = F.softplus(raw[:, 2:3] + 2.0)
+    #R = F.softplus(raw[:, 3:4] + 2.0)
+
+    E_max = 0.1  # 10% of population in exposed compartment is an extreme upper bound
+    E = E_max * torch.sigmoid(raw[:, 1:2])
+    I = E_max * torch.sigmoid(raw[:, 2:3])
+    R = torch.sigmoid(raw[:, 3:4])  # R can range 0 to 1
+
+    beta = 0.15 * torch.sigmoid(raw[:, 4:5]) * 2.0
     return torch.cat([S, E, I, R, beta], dim=1)
 
 def ode_loss(model, t, epsilon, causal = False):
@@ -143,9 +156,11 @@ def data_loss(model, tk, I_obs):
     # data loss 
     # calculate cumulative incidence from the model 
     out = forward_with_constraints(model, tk)
+    N = 100000
     E = out[:, 1]
     sigma = 1/5.2
-    predicted_incidence = sigma * E
+    predicted_incidence = N * sigma * E
+    observed = N * observed
     v_loss = torch.mean((predicted_incidence - observed) **2)
     return v_loss
 
@@ -171,7 +186,7 @@ def time_to_train():
     t_colloc_tensor = torch.tensor(t_colloc_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
     return t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days
 
-def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
+def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
     N = 100000
     ICs = [(N-2)/N, 0, 2/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
@@ -184,78 +199,131 @@ def train_model(epochs=10000, test_days=0, causal = False, epsilon = 3, save = F
     t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days = time_to_train()
     t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
 
-    # # Split into train and test
-    # train_days = total_days - test_days
-    # train_indices = np.arange(0, train_days)
-    
-    # # Training time tensor (only training points)
-    # t_train_np = t_data_np[train_indices] # training time
-    # t_train_tensor = torch.tensor(t_train_np.reshape(-1, 1), dtype=torch.float32, requires_grad=True) 
-    # Ir_train = Ir_obs[train_indices] # and cases at those time points
-
-    # print(f"t_train_np: {t_train_np[:20].flatten()}")
-    # print(f"t_train_tensor: {t_train_tensor[:20].flatten()}")
-
-    # if t_train_np (or t_train_tensor) is used to evaluate the model
-    # how do you determine data loss? 
-
     # Create model
     model = create_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     def get_weights(ep):
-        w_ic   = 1.0
-        w_ode  = 1.0
-        w_data = 1.0
-        return w_ic, w_ode, w_data
-    print(f"{'Ep':>6} {'IC':>12} {'ODE':>12} {'data':>12} {'Total':>12}  S_range       beta_range")
-   
-    history = []
-    for ep in range(epochs):
-        w_ic , w_ode, w_data = get_weights(ep)
-        optimizer.zero_grad() #reset any previous gradients
+        if ep < 1000:
+            return 100.0, 0.0, 1.0   # data-driven warmup, no physics
+        elif ep < 3000:
+            return 100.0, 0.1, 1.0   # gradually re-introduce physics
+        else:
+            return 100.0, 1.0, 1.0   # full training
+    
+    history = []    
+    logs = []   # store rows here
+    bar_len = 30 # create a little pbar 
 
+    for ep in range(epochs):
+        optimizer.zero_grad() #reset any previous gradients
+        w_ic, w_ode, w_data = get_weights(ep)  # initialize weights
         l_ic = ic_loss(model, ICs, t0)
         l_data = data_loss(model, t_data_tensor, Ir_obs)
         if causal:
             l_ode = ode_loss(model, t_colloc_tensor, epsilon=epsilon, causal=True)
         else:
             l_ode = ode_loss(model, t_colloc_tensor, epsilon=0.0, causal=False)
-
         loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data
         loss.backward()
         
         # Gradient clipping
         #calculate L2 norm for all gradients, if its >1 then scale it to norm=1, and if <1 then does nothing
         #we need this to be safe from exploding gradient
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         #scheduler.step()
        
-        history.append(loss.item()) #loss is a tensor with attached graph, it remembers how it was computed,
+        history.append(loss.detach()) #loss is a tensor with attached graph, it remembers how it was computed,
         #takes lot of memory, we need to convert it to a scalar value so 
         # we detach it from the graph and then convert to a python number using item()
        
         if ep % 1000 == 0:
+            # at every 1000, run the model to see how well it's performing. 
+            progress = int((ep / epochs) * bar_len)
+            bar = "#" * progress + "-" * (bar_len - progress)
+            print(f"\r[{bar}] {ep}/{epochs}", end="")          
+
             with torch.no_grad():
                 out = forward_with_constraints(model, t_data_tensor)
-                s_range = f"[{out[:,0].min():.4f}, {out[:,0].max():.4f}]"
-                b_range = f"[{out[:,4].min():.3f}, {out[:,4].max():.3f}]"
-            print(f"{ep:} {l_ic.item():} {l_ode.item():} {l_data.item():} "
-                  f"{loss.item():}  {s_range}  {b_range}")
-    
+                s_min, s_max = out[:,0].min(), out[:,0].max()
+                b_min, b_max = out[:,4].min(), out[:,4].max()
+            # store GPU tensors directly (no .item())
+            logs.append([
+                ep,
+                l_ic.detach(),
+                l_ode.detach(),
+                l_data.detach(),
+                loss.detach(),
+                s_min, s_max,
+                b_min, b_max
+            ])
+
+    # print out logging. 
     print("finished training")
+    print(f"{'ep':>8} {'l_ic':>10} {'l_ode':>10} {'l_data':>10} {'loss':>10} "
+      f"{'s_range':<18} {'b_range':<18}")
+    for row in logs:
+        ep, l_ic, l_ode, l_data, loss, s_min, s_max, b_min, b_max = row
+        print(
+            f"{ep:8d} "
+            f"{l_ic.item():12.3e} "
+            f"{l_ode.item():12.3e} "
+            f"{l_data.item():12.3e} "
+            f"{loss.item():12.3e} "
+            f"[{s_min.item():.3f}, {s_max.item():.3f}]{'':>3}"
+            f"[{b_min.item():.3f}, {b_max.item():.3f}]"
+        )
+    history = [h.cpu().item() for h in history]
+
+    
+    with torch.no_grad():
+        out = forward_with_constraints(model, t_data_tensor)
+        pred_inci = (1/5.2) * out[:, 1].cpu().numpy()
+    print("\nFinal Predictions on Training Data:")    
+    print(f"Predicted incidence range: [{pred_inci.min():.3e}, {pred_inci.max():.3e}]")
+    print(f"Predicted incidence mean:  {pred_inci.mean():.3e}")
+    print(f"Observed incidence range:  [{Ir_obs.min():.3e}, {Ir_obs.max():.3e}]")
+    print(f"Observed incidence mean:   {Ir_obs.mean():.3e}")
+    print(f"'Predict zero' floor:      {(Ir_obs**2).mean():.3e}")
+    print(f"Actual l_data:             {l_data.item():.3e}")
+
     if save: 
         torch.save(model.state_dict(), f"{model_name}.pth") 
     return model, history
 
+def test_grad_flow(): 
+    cases = get_syn_data()
+    Ir_obs = cases / 100000 # convert cases to a proportion
+    
+    model = create_model().to(device)
+    # Forward + IC loss
+    t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
+    l_ic = ic_loss(model, [(100000-2)/100000, 0, 2/100000, 0], t0)
+
+    # Data loss only
+    t_data = torch.arange(730, dtype=torch.float32, device=device).reshape(-1, 1).requires_grad_(True)
+    l_data = data_loss(model, t_data, Ir_obs)
+
+    print(f"l_ic = {l_ic.item():.3e}")
+    print(f"l_data = {l_data.item():.3e}")
+
+    # Manually backprop data loss alone
+    l_data.backward()
+    total_grad = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
+    print(f"Total gradient norm from data loss: {total_grad:.3e}")
+
+    # Are any parameters specifically dead?
+    for name, p in model.named_parameters():
+        if p.grad is not None:
+            print(f"  {name}: ||grad|| = {p.grad.norm().item():.3e}")
 
 def load_model(path):
     model = create_model().to(device)
     model.load_state_dict(torch.load(path))
     return model
 
-def plot_loss(l_history):
+def plot_loss(l_history, fname = "training_history.png"):
     plt.figure(figsize=(10, 4))
     plt.plot(l_history)
     plt.yscale('log')
@@ -263,10 +331,11 @@ def plot_loss(l_history):
     plt.ylabel('Loss')
     plt.title('Training History')
     plt.grid(True)
-    plt.savefig("training_history.png")
+    plt.savefig(f"{fname}_loss.png")
     #plt.close()
 
-def plot_model(model):
+def plot_model(model, fname = "model_predictions.png"):
+    print("plotting")
     t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days = time_to_train()
     #t_np_full, t_full, total_days = time_to_train()
     with torch.no_grad():
@@ -303,18 +372,27 @@ def plot_model(model):
     plt.ylabel("Transmission Rate β(t)")
     plt.grid(True)
     plt.show()
+    plt.savefig(f"{fname}_check.png")
 
 def testm(): 
-    print("testing all models")
-    m1, h1 = train_model() 
-    plot_loss(h1)
-    plot_model(m1)
-    #m1, h1 = train_model(causal = True, epsilon = 3) 
-    #plot_loss(h1)
-    #plot_model(m1)
-    m1, h1 = train_model(causal = True, epsilon = 0.5) 
-    plot_loss(h1)
-    plot_model(m1)
+    is_causal_options = [False, True]  # False = Vanilla, True = Causal
+    ic_weights = [1.0, 100.0]
+    data_weights = [1.0, 1000.0]
+
+    #for causal, w_ic, w_data in itertools.product(is_causal_options, ic_weights, data_weights):
+    for causal in is_causal_options:
+        model_type = "causal" if causal else "vanilla"
+        fname = f"{model_type}_icx_datax"
+        print(f"Starting Run: {fname}")
+        print(f"{'='*10}")
+        m1, h1 = train_model(
+            save=True, 
+            model_name=fname, 
+            causal=causal, 
+            epsilon=0.5 if causal else 0.0, 
+        )
+        plot_loss(h1, fname)
+        plot_model(m1, fname)    
 
 
 # #Run everything
