@@ -158,13 +158,13 @@ def time_to_train(total_days = 730):
 
 def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
-    N = 100000
-    ICs = [(N-2)/N, 0, 50/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
+    N = 1000
+    ICs = [(N-5)/N, 0, 5/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
     cases, _ = get_syn_data()
     sigma, gamma, omega = get_parama()
     Ir_obs = cases / N # convert cases to a proportion
     obs_tensor = torch.tensor((Ir_obs), dtype=torch.float32, device=device) 
-    
+ 
     # get time vector, np and tensor types\
     # plus a t0 tensor to pass to the IC loss function, 
     # since it needs to evaluate the model at t=0

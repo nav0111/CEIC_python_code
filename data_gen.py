@@ -133,9 +133,9 @@ def calculate_rt(t_arr, beta_func, susc_arr, N, gamma):
 # generate data with defaults
 def generate_data_with_defaults(betafn):
     t = np.arange(730) 
-    N = 100000
+    N = 1000
     E0 = 0
-    I0 = 50
+    I0 = 5
     S0 = N - I0
     R0 = 0
     C0 = 0 ### ? why I guess, initial infections. Let's start with 2 exposed. 
@@ -166,33 +166,33 @@ def plot_data():
     # code that will run when we execute this file directly, 
     # but not when we import it as a module in another file.    
     plt.figure(figsize=(16, 10))
-    # plt.subplot(2, 5, 1)
-    # plt.plot(data1, label = 'constant beta')
-    # plt.subplot(2, 5, 2)
-    # plt.plot(data2, label = 'sigmoid beta')
+    plt.subplot(2, 5, 1)
+    plt.plot(data1, label = 'constant beta')
+    plt.subplot(2, 5, 2)
+    plt.plot(data2, label = 'sigmoid beta')
     plt.subplot(2, 5, 3)
     plt.plot(data3, label = 'seasonal beta')
-    #plt.subplot(2, 5, 4)
-    #plt.plot(data4, label = 'piecewise beta')
-    #plt.subplot(2, 5, 5)
-    #plt.plot(data5, label = 'sawtooth beta')
+    plt.subplot(2, 5, 4)
+    plt.plot(data4, label = 'piecewise beta')
+    plt.subplot(2, 5, 5)
+    plt.plot(data5, label = 'sawtooth beta')
 
-    #plt.subplot(2, 5, 6)
-    #beta_val = [beta_fn1(x) for x in range(730)]
-    #plt.plot(beta_val, label = 'constant beta')
+    plt.subplot(2, 5, 6)
+    beta_val = [beta_fn1(x) for x in range(730)]
+    plt.plot(beta_val, label = 'constant beta')
 
-    #plt.subplot(2, 5, 7)
-    #plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
+    plt.subplot(2, 5, 7)
+    plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
 
     plt.subplot(2, 5, 8)
     plt.plot(beta_fn3(np.arange(730)), label = 'seasonal beta')
 
-    #plt.subplot(2, 5, 9)
-    #plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
+    plt.subplot(2, 5, 9)
+    plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
 
-    #plt.subplot(2, 5, 10)
-    #plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
-    plt.savefig('Five_incidence_curves2.png')
+    plt.subplot(2, 5, 10)
+    plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
+    plt.savefig('Five_incidence_curves.png')
     plt.close()
 
 if __name__ == "__main__":
