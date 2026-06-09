@@ -29,24 +29,25 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 def get_syn_data():
-    beta_fn3 = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
-    data3 = generate_data_with_defaults(beta_fn3) 
-    return data3 # let's play with the seasonal one. 
+    # get the incidence curve and the beta curve
+    betafn = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
+    data3, beta3 = generate_data_with_defaults(betafn) 
+    return data3, beta3 
 
 #synthetic data params
-def get_parama(total_days):
+def get_parama():
     """Constant sigma and gamma for synthetic data"""
-    sigma_t = np.full(total_days, 1/5.2)
-    gamma_t = np.full(total_days, 1/10)
-    omega_t = np.full(total_days, 1/60) 
+    sigma_t = 1/5.2
+    gamma_t = 1/10
+    omega_t = 1/60
     params = sigma_t, gamma_t, omega_t
     return params
 
 def create_model():
     model = nn.Sequential(
-        nn.Linear(1, 96), nn.SiLU(),
-        nn.Linear(96, 96), nn.SiLU(),
-        nn.Linear(96, 96), nn.SiLU(),
+        nn.Linear(1, 96), nn.Tanh(),
+        nn.Linear(96, 96), nn.Tanh(),
+        nn.Linear(96, 96), nn.Tanh(),
         nn.Linear(96, 5)
     )
     return model
@@ -54,36 +55,22 @@ def create_model():
 def forward_with_constraints(model, t):
     raw = model(t)
     S = torch.sigmoid(raw[:, 0:1])
-    #E = F.softplus(raw[:, 1:2] + 2.0)
-    #I = F.softplus(raw[:, 2:3] + 2.0)
-    #R = F.softplus(raw[:, 3:4] + 2.0)
-
-    E_max = 0.1  # 10% of population in exposed compartment is an extreme upper bound
-    E = E_max * torch.sigmoid(raw[:, 1:2])
-    I = E_max * torch.sigmoid(raw[:, 2:3])
-    R = torch.sigmoid(raw[:, 3:4])  # R can range 0 to 1
-
-    beta = 0.15 * torch.sigmoid(raw[:, 4:5]) * 2.0
+    E = F.softplus(raw[:, 1:2])
+    I = F.softplus(raw[:, 2:3])
+    R = F.softplus(raw[:, 3:4])
+    beta = 0.6 * torch.sigmoid(raw[:, 4:5]) 
     return torch.cat([S, E, I, R, beta], dim=1)
 
-def ode_loss(model, t, epsilon, causal = False):
-    out = forward_with_constraints(model, t)
-   
-    # the output of the neural network at time t
-    # since t is a tensor, S is also a tensor and stores the computation graph
+def ode_loss(model, tk, max_time, epsilon, causal = False):
+    out = forward_with_constraints(model, tk)
     S = out[:, 0]
     E = out[:, 1]
     I = out[:, 2]
     R = out[:, 3]
     beta = out[:, 4]
 
-   #creates a tensor of all 1's same shape as S, need this to combine gradients from multiple outputs
     ones = torch.ones_like(S) #compute derivative for each point independently. 
-    #If E = [E1, E2, E3, ...] (vector)
-    #grad_outputs = [v1, v2, v3, ...]
-    #Then result = v1 * ∂E1/∂t + v2 * ∂E2/∂t + v3 * ∂E3/∂t + ...
-    #create_graph= True, because we need derivative of a derivative otherwise the term would consider as a constant
-   
+
     # the tensor ones is needed because grad computes VJP. 
     # retain_graph is needed for the repeated grad calls after S (for E, I, R)
     # create_graph is needed, otherwise torch treats the gradients as constants? 
@@ -97,10 +84,10 @@ def ode_loss(model, t, epsilon, causal = False):
     # which means we need to be able to do dQ/dtheta, which is d(dS/dt)/dtheta, which is the second derivative of S w.r.t time and parameters.
     # so create_graph creats the computational graph so we can do ode_loss.backward() later on
     # squeeze: giving you a one-dimensional tensor of shape (n_points,) instead of (n_points, 1)
-    dSdt = grad.grad(S, t, grad_outputs=ones, create_graph = True)[0].squeeze()
-    dEdt = grad.grad(E, t, grad_outputs=ones, create_graph = True)[0].squeeze()
-    dIdt = grad.grad(I, t, grad_outputs=ones, create_graph = True)[0].squeeze()
-    dRdt = grad.grad(R, t, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dSdt = grad.grad(S, tk, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dEdt = grad.grad(E, tk, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dIdt = grad.grad(I, tk, grad_outputs=ones, create_graph = True)[0].squeeze()
+    dRdt = grad.grad(R, tk, grad_outputs=ones, create_graph = True)[0].squeeze()
    
     #convert sigma and gamma arrays to tensors and get the values at the corresponding time points
     sigma = 1/5.2
@@ -111,56 +98,49 @@ def ode_loss(model, t, epsilon, causal = False):
     Trans = beta * S * I
     
     # compute the residuals
-    r_S = dSdt + Trans - (omega * R)
-    r_E = dEdt - (Trans - sigma * E)
-    r_I = dIdt - (sigma * E - gamma * I)
-    r_R = dRdt - (gamma * I - omega * R)
+    r_S = dSdt + max_time * (Trans - (omega * R))
+    r_E = dEdt - max_time * (Trans - sigma * E)
+    r_I = dIdt - max_time * (sigma * E - gamma * I)
+    r_R = dRdt - max_time * (gamma * I - omega * R)
     loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2)
 
+    # CRITICAL: Divide the raw squared residuals by max_time**2 
+    # This normalizes the continuous physics loss back to O(1) bounds
+    loss = (r_S**2 + r_E**2 + r_I**2 + r_R**2) / (max_time ** 2)
+
     if causal:
-        past_errors = loss.detach()
-        #compute number of points
-        n_points = past_errors.shape[0]
+        # CRITICAL: Normalize the loss to O(1) before passing to exponent
+        # Otherwise exp(-epsilon * 100000) underflows to 0 instantly
+        normalized_loss = loss.detach()
+        n_points = normalized_loss.shape[0]
         cumulative_past_errors = torch.zeros(n_points, device=device)
-        cumulative_past_errors[1:] = torch.cumsum(past_errors[:-1], dim = 0)
+        cumulative_past_errors[1:] = torch.cumsum(normalized_loss[:-1], dim=0)
 
-    #weight = exp(-epsilon * cumulative past errors), very small ϵcan prevent the network 
-    # from effectively minimizing the latter temporal residuals, a large ϵ value can result in a more difficult optimization problem, because the temporal residuals at earlier times have to decrease to a very small value in order to activate the latter temporal weights
         weights = torch.exp(-epsilon * cumulative_past_errors)
-
-    #at t=0, weight must be 1, because we should learn the IC first
         weights[0] = 1.0
-        weighted_error = weights * loss
-
-        ode_loss = weighted_error.mean()
+        
+        # Apply weights to the ORIGINAL loss for gradient updates
+        ode_loss = (weights * loss).mean()
     else:
-
         ode_loss = loss.mean()
 
     return ode_loss
 
 def ic_loss(model, ICs, t0):
+    # evaluates the model at t = 0
     S0, E0, I0, R0 = ICs
-    #t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
     out = forward_with_constraints(model, t0)
     pred = out[0, :4]  # selects columns 0, 1, 2, 3, corresponding to S, E, I, R at t =0
     target = torch.tensor([S0, E0, I0, R0], dtype=torch.float32, device=device)
     v_loss = ((pred - target)**2).mean()
     return v_loss
 
-def data_loss(model, tk, I_obs):
-    # t_k = torch.tensor(t_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
-    # observed incidence or cumualtive incidence
-    observed = torch.tensor((I_obs), dtype=torch.float32, device=device)
-    
-    # data loss 
-    # calculate cumulative incidence from the model 
+def data_loss(model, tk, observed):
+    # data loss, run the model on the time tensor
     out = forward_with_constraints(model, tk)
-    N = 100000
     E = out[:, 1]
-    sigma = 1/5.2
-    predicted_incidence = N * sigma * E
-    observed = N * observed
+    sigma = 1/5.2 # replace with get_parama later.
+    predicted_incidence = sigma * E
     v_loss = torch.mean((predicted_incidence - observed) **2)
     return v_loss
 
@@ -169,47 +149,39 @@ def conservation_loss(model, t):
     total = out[:, 0] + out[:, 1] + out[:, 2] + out[:, 3]
     return torch.mean((total - 1.0) ** 2)
 
-def time_to_train():
-    cases = get_syn_data()
-    total_days = len(cases)
-    #t_np_full = np.linspace(0, total_days, total_days, dtype=np.float32)
-    t_np_full = np.arange(total_days, dtype=np.float32)
-    t_full = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
-
-    # Data points (one per day, where observations exist)
-    t_data_np = np.arange(total_days, dtype=np.float32)
-    t_data_tensor = torch.tensor(t_data_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
-
-    # Collocation points (denser, for ODE residual)
-    n_colloc = 5000  # vs ~720 data points
-    t_colloc_np = np.linspace(0, total_days - 1, n_colloc).astype(np.float32)
-    t_colloc_tensor = torch.tensor(t_colloc_np.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
-    return t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days
+def time_to_train(total_days = 730):
+    # create time tensors, normalized from 0 to 1. 
+    t_data_tensor = torch.linspace(0, 1, steps=total_days, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
+    t_colloc_tensor = torch.linspace(0, 1, steps=5000, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
+    t_ic_tensor = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
+    return t_data_tensor, t_colloc_tensor, t_ic_tensor
 
 def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
     N = 100000
-    ICs = [(N-2)/N, 0, 2/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
-    cases = get_syn_data()
+    ICs = [(N-2)/N, 0, 50/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
+    cases, _ = get_syn_data()
+    sigma, gamma, omega = get_parama()
     Ir_obs = cases / N # convert cases to a proportion
+    obs_tensor = torch.tensor((Ir_obs), dtype=torch.float32, device=device) 
     
     # get time vector, np and tensor types\
     # plus a t0 tensor to pass to the IC loss function, 
     # since it needs to evaluate the model at t=0
-    t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days = time_to_train()
-    t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
-
+    max_time = len(Ir_obs)
+    t_data_tensor, t_colloc_tensor, t_ic_tensor = time_to_train(max_time)
+ 
     # Create model
     model = create_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     def get_weights(ep):
         if ep < 1000:
-            return 100.0, 0.0, 1.0   # data-driven warmup, no physics
+            return 100.0, 1.0, 10000.0   # data-driven warmup, no physics
         elif ep < 3000:
-            return 100.0, 0.1, 1.0   # gradually re-introduce physics
+            return 100.0, 1.0, 10000.0   # gradually re-introduce physics
         else:
-            return 100.0, 1.0, 1.0   # full training
+            return 100.0, 1.0, 10000.0   # full training
     
     history = []    
     logs = []   # store rows here
@@ -218,13 +190,14 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
     for ep in range(epochs):
         optimizer.zero_grad() #reset any previous gradients
         w_ic, w_ode, w_data = get_weights(ep)  # initialize weights
-        l_ic = ic_loss(model, ICs, t0)
-        l_data = data_loss(model, t_data_tensor, Ir_obs)
+        l_ic = ic_loss(model, ICs, t_ic_tensor)
+        l_data = data_loss(model, t_data_tensor, obs_tensor)
+        l_cons = conservation_loss(model, t_colloc_tensor) 
         if causal:
-            l_ode = ode_loss(model, t_colloc_tensor, epsilon=epsilon, causal=True)
+            l_ode = ode_loss(model, t_colloc_tensor, max_time, epsilon=epsilon, causal=True)
         else:
-            l_ode = ode_loss(model, t_colloc_tensor, epsilon=0.0, causal=False)
-        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data
+            l_ode = ode_loss(model, t_colloc_tensor, max_time, epsilon=0.0, causal=False)
+        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data + 500.0 * l_cons
         loss.backward()
         
         # Gradient clipping
@@ -234,10 +207,10 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
         optimizer.step()
         #scheduler.step()
        
-        history.append(loss.detach()) #loss is a tensor with attached graph, it remembers how it was computed,
-        #takes lot of memory, we need to convert it to a scalar value so 
-        # we detach it from the graph and then convert to a python number using item()
-       
+        # detach the computation graph from loss
+        history.append(loss.detach()) 
+        
+        # save logs every 1000 epochs
         if ep % 1000 == 0:
             # at every 1000, run the model to see how well it's performing. 
             progress = int((ep / epochs) * bar_len)
@@ -279,7 +252,7 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
     
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
-        pred_inci = (1/5.2) * out[:, 1].cpu().numpy()
+        pred_inci = sigma * out[:, 1].cpu().numpy()
     print("\nFinal Predictions on Training Data:")    
     print(f"Predicted incidence range: [{pred_inci.min():.3e}, {pred_inci.max():.3e}]")
     print(f"Predicted incidence mean:  {pred_inci.mean():.3e}")
@@ -292,32 +265,6 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
         torch.save(model.state_dict(), f"{model_name}.pth") 
     return model, history
 
-def test_grad_flow(): 
-    cases = get_syn_data()
-    Ir_obs = cases / 100000 # convert cases to a proportion
-    
-    model = create_model().to(device)
-    # Forward + IC loss
-    t0 = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
-    l_ic = ic_loss(model, [(100000-2)/100000, 0, 2/100000, 0], t0)
-
-    # Data loss only
-    t_data = torch.arange(730, dtype=torch.float32, device=device).reshape(-1, 1).requires_grad_(True)
-    l_data = data_loss(model, t_data, Ir_obs)
-
-    print(f"l_ic = {l_ic.item():.3e}")
-    print(f"l_data = {l_data.item():.3e}")
-
-    # Manually backprop data loss alone
-    l_data.backward()
-    total_grad = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
-    print(f"Total gradient norm from data loss: {total_grad:.3e}")
-
-    # Are any parameters specifically dead?
-    for name, p in model.named_parameters():
-        if p.grad is not None:
-            print(f"  {name}: ||grad|| = {p.grad.norm().item():.3e}")
-
 def load_model(path):
     model = create_model().to(device)
     model.load_state_dict(torch.load(path))
@@ -325,19 +272,17 @@ def load_model(path):
 
 def plot_loss(l_history, fname = "training_history.png"):
     plt.figure(figsize=(10, 4))
-    plt.plot(l_history)
-    plt.yscale('log')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    
     plt.title('Training History')
     plt.grid(True)
     plt.savefig(f"{fname}_loss.png")
     #plt.close()
 
-def plot_model(model, fname = "model_predictions.png"):
-    print("plotting")
-    t_data_np, t_data_tensor, t_colloc_np, t_colloc_tensor, total_days = time_to_train()
-    #t_np_full, t_full, total_days = time_to_train()
+def plot_model(model, loss_history, fname = "model_predictions.png"):
+    obs, true_beta = get_syn_data()
+    t_data_tensor, _, _ = time_to_train()
+    # evaluate the trained model on the training points
+    # but these are between 0 and 1? 
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
     S = out[:, 0].cpu().numpy()
@@ -346,7 +291,7 @@ def plot_model(model, fname = "model_predictions.png"):
     R = out[:, 3].cpu().numpy()
     pred_beta = out[:, 4].cpu().numpy()
 
-    # check model consistency
+    # # check model consistency
     total = out[:, :4].sum(dim=1)
     print(f"Conservation: min={total.min():.4f}, max={total.max():.4f}")
 
@@ -357,28 +302,40 @@ def plot_model(model, fname = "model_predictions.png"):
     print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
     print(f"S at end: {out[-1, 0]:.4f}")
 
-    true_beta = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)(t_data_np)
+    
     plt.figure(figsize=(14, 8)) 
-    plt.subplot(2, 1, 1)
-    plt.plot(t_data_np, S, label="S(t)")
-    plt.plot(t_data_np, E, label="E(t)")
-    plt.plot(t_data_np, I, label="I(t)")
-    plt.plot(t_data_np, R, label="R(t)")
+    plt.subplot(4, 1, 1)
+    plt.plot(S, label="S(t)")
+    plt.plot(E, label="E(t)")
+    plt.plot(I, label="I(t)")
+    plt.plot(R, label="R(t)")
+    plt.ylabel("SEIR model")
 
-    plt.subplot(2, 1, 2)
+    plt.subplot(4, 1, 2)
     plt.plot(pred_beta, color="blue")
     plt.plot(true_beta, color="black")
     plt.title("Beta(t)")
     plt.ylabel("Transmission Rate β(t)")
     plt.grid(True)
-    plt.show()
+
+    plt.subplot(4, 1, 3)
+    plt.plot(obs, label="Observed Incidence")
+    plt.plot(I, label="modelled I(t)")
+    plt.ylabel("modelled vs observed I")
+
+    plt.subplot(4, 1, 4)
+    plt.plot(loss_history, label="Total Loss")
+    plt.yscale('log')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+
     plt.savefig(f"{fname}_check.png")
+    #plt.show()
+    
 
 def testm(): 
     is_causal_options = [False, True]  # False = Vanilla, True = Causal
-    ic_weights = [1.0, 100.0]
-    data_weights = [1.0, 1000.0]
-
+    
     #for causal, w_ic, w_data in itertools.product(is_causal_options, ic_weights, data_weights):
     for causal in is_causal_options:
         model_type = "causal" if causal else "vanilla"
@@ -386,13 +343,13 @@ def testm():
         print(f"Starting Run: {fname}")
         print(f"{'='*10}")
         m1, h1 = train_model(
-            save=True, 
-            model_name=fname, 
-            causal=causal, 
-            epsilon=0.5 if causal else 0.0, 
+            epochs = 10000,
+            save = True, 
+            model_name = fname, 
+            causal = causal, 
+            epsilon = 0.5 if causal else 0.0, 
         )
-        plot_loss(h1, fname)
-        plot_model(m1, fname)    
+        plot_model(m1, h1, fname)    
 
 
 # #Run everything

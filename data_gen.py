@@ -131,18 +131,18 @@ def calculate_rt(t_arr, beta_func, susc_arr, N, gamma):
 
 #%% 
 # generate data with defaults
-def generate_data_with_defaults(beta_func): 
-    # function creates a panel of all the scenarios 
+def generate_data_with_defaults(betafn):
     t = np.arange(730) 
     N = 100000
-    S0 = N - 2
     E0 = 0
-    I0 = 2
+    I0 = 50
+    S0 = N - I0
     R0 = 0
     C0 = 0 ### ? why I guess, initial infections. Let's start with 2 exposed. 
     sigma, gamma, omega = 1/5.2, 1/10, 1/60 # no waning immunity for now, so omega = 0.0
-    _, _, _, _, _, Z = gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
-    return Z
+    _, _, _, _, _, Z = gen_inci(betafn, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
+    return Z, betafn(t)
+
 
 def plot_data(): 
     # TO DO : find the reproduction number for each of these, but remember 
@@ -153,11 +153,11 @@ def plot_data():
     beta_fn3 = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
     beta_fn4 = piecewise_beta(beta_values=[0.22, 0.10, 0.16], change_times=[120, 360])
     beta_fn5 = sawtooth_beta(beta_min=0.10, beta_max=0.20, t0=0, T=180)
-    data1 = generate_data_with_defaults(beta_fn1) 
-    data2 = generate_data_with_defaults(beta_fn2) 
-    data3 = generate_data_with_defaults(beta_fn3) 
-    data4 = generate_data_with_defaults(beta_fn4) 
-    data5 = generate_data_with_defaults(beta_fn5) 
+    data1, beta1 = generate_data_with_defaults(beta_fn1) 
+    data2, beta2 = generate_data_with_defaults(beta_fn2) 
+    data3, beta3 = generate_data_with_defaults(beta_fn3) 
+    data4, beta4 = generate_data_with_defaults(beta_fn4) 
+    data5, beta5 = generate_data_with_defaults(beta_fn5) 
     print(f"final size: {data1.sum()}")
     print(f"final size: {data2.sum()}")
     print(f"final size: {data3.sum()}")
@@ -166,34 +166,34 @@ def plot_data():
     # code that will run when we execute this file directly, 
     # but not when we import it as a module in another file.    
     plt.figure(figsize=(16, 10))
-    plt.subplot(2, 5, 1)
-    plt.plot(data1, label = 'constant beta')
-    plt.subplot(2, 5, 2)
-    plt.plot(data2, label = 'sigmoid beta')
+    # plt.subplot(2, 5, 1)
+    # plt.plot(data1, label = 'constant beta')
+    # plt.subplot(2, 5, 2)
+    # plt.plot(data2, label = 'sigmoid beta')
     plt.subplot(2, 5, 3)
     plt.plot(data3, label = 'seasonal beta')
-    plt.subplot(2, 5, 4)
-    plt.plot(data4, label = 'piecewise beta')
-    plt.subplot(2, 5, 5)
-    plt.plot(data5, label = 'sawtooth beta')
+    #plt.subplot(2, 5, 4)
+    #plt.plot(data4, label = 'piecewise beta')
+    #plt.subplot(2, 5, 5)
+    #plt.plot(data5, label = 'sawtooth beta')
 
-    plt.subplot(2, 5, 6)
-    beta_val = [beta_fn1(x) for x in range(730)]
-    plt.plot(beta_val, label = 'constant beta')
+    #plt.subplot(2, 5, 6)
+    #beta_val = [beta_fn1(x) for x in range(730)]
+    #plt.plot(beta_val, label = 'constant beta')
 
-    plt.subplot(2, 5, 7)
-    plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
+    #plt.subplot(2, 5, 7)
+    #plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
 
     plt.subplot(2, 5, 8)
     plt.plot(beta_fn3(np.arange(730)), label = 'seasonal beta')
 
-    plt.subplot(2, 5, 9)
-    plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
+    #plt.subplot(2, 5, 9)
+    #plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
 
-    plt.subplot(2, 5, 10)
-    plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
-    plt.savefig('Five_incidence_curves.png')
-    #plt.close()
+    #plt.subplot(2, 5, 10)
+    #plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
+    plt.savefig('Five_incidence_curves2.png')
+    plt.close()
 
 if __name__ == "__main__":
     print("main run.")
