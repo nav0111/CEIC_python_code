@@ -125,6 +125,7 @@ def ode_loss(model, tk, max_time, epsilon, causal = False):
         ode_loss = loss.mean()
 
     return ode_loss
+    
 
 def ic_loss(model, ICs, t0):
     # evaluates the model at t = 0
@@ -141,7 +142,13 @@ def data_loss(model, tk, observed):
     E = out[:, 1]
     sigma = 1/5.2 # replace with get_parama later.
     predicted_incidence = sigma * E
-    v_loss = torch.mean((predicted_incidence - observed) **2)
+    v_loss = torch.mean((predicted_incidence - observed)**2)
+    return v_loss
+
+def prev_loss(model, tk, observed):
+    out = forward_with_constraints(model, tk)
+    I = out[:,2]
+    v_loss = torch.mean(( I - observed)**2)
     return v_loss
 
 def conservation_loss(model, t):
@@ -152,7 +159,7 @@ def conservation_loss(model, t):
 def time_to_train(total_days = 730):
     # create time tensors, normalized from 0 to 1. 
     t_data_tensor = torch.linspace(0, 1, steps=total_days, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
-    t_colloc_tensor = torch.linspace(0, 1, steps=5000, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
+    t_colloc_tensor = torch.linspace(0, 1, steps=1000, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
     t_ic_tensor = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
     return t_data_tensor, t_colloc_tensor, t_ic_tensor
 
@@ -177,11 +184,11 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
 
     def get_weights(ep):
         if ep < 1000:
-            return 100.0, 1.0, 10000.0   # data-driven warmup, no physics
+            return 100.0, 1.0, 1.0   # data-driven warmup, no physics
         elif ep < 3000:
-            return 100.0, 1.0, 10000.0   # gradually re-introduce physics
+            return 100.0, 100.0, 100.0   # gradually re-introduce physics
         else:
-            return 100.0, 1.0, 10000.0   # full training
+            return 100.0, 1000.0, 1000.0   # full training
     
     history = []    
     logs = []   # store rows here
@@ -191,13 +198,15 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
         optimizer.zero_grad() #reset any previous gradients
         w_ic, w_ode, w_data = get_weights(ep)  # initialize weights
         l_ic = ic_loss(model, ICs, t_ic_tensor)
-        l_data = data_loss(model, t_data_tensor, obs_tensor)
+        #l_data = data_loss(model, t_data_tensor, obs_tensor)
+        l_data = prev_loss(model, t_data_tensor, obs_tensor)
         l_cons = conservation_loss(model, t_colloc_tensor) 
         if causal:
             l_ode = ode_loss(model, t_colloc_tensor, max_time, epsilon=epsilon, causal=True)
         else:
             l_ode = ode_loss(model, t_colloc_tensor, max_time, epsilon=0.0, causal=False)
-        loss = w_ic * l_ic + w_ode * l_ode + w_data * l_data + 500.0 * l_cons
+        loss = w_ic * l_ic  + w_ode * l_ode + w_data * l_data + 500.0 * l_cons
+
         loss.backward()
         
         # Gradient clipping
@@ -219,6 +228,7 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
 
             with torch.no_grad():
                 out = forward_with_constraints(model, t_data_tensor)
+                # get the susceptible, beta vector min/max 
                 s_min, s_max = out[:,0].min(), out[:,0].max()
                 b_min, b_max = out[:,4].min(), out[:,4].max()
             # store GPU tensors directly (no .item())
@@ -227,6 +237,7 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
                 l_ic.detach(),
                 l_ode.detach(),
                 l_data.detach(),
+                l_cons.detach(),
                 loss.detach(),
                 s_min, s_max,
                 b_min, b_max
@@ -234,15 +245,17 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
 
     # print out logging. 
     print("finished training")
-    print(f"{'ep':>8} {'l_ic':>10} {'l_ode':>10} {'l_data':>10} {'loss':>10} "
+    print(f"{'ep':>8} {'l_ic':>10} {'l_ode':>10} {'l_data':>10} {'l_cons':>10} {'loss':>10} "
       f"{'s_range':<18} {'b_range':<18}")
     for row in logs:
-        ep, l_ic, l_ode, l_data, loss, s_min, s_max, b_min, b_max = row
+        ep, l_ic, l_ode, l_data, l_cons, loss, s_min, s_max, b_min, b_max = row
+        
         print(
             f"{ep:8d} "
             f"{l_ic.item():12.3e} "
             f"{l_ode.item():12.3e} "
             f"{l_data.item():12.3e} "
+            f"{l_cons.item():12.3e} "
             f"{loss.item():12.3e} "
             f"[{s_min.item():.3f}, {s_max.item():.3f}]{'':>3}"
             f"[{b_min.item():.3f}, {b_max.item():.3f}]"
@@ -252,7 +265,7 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
     
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
-        pred_inci = sigma * out[:, 1].cpu().numpy()
+        pred_inci = out[:, 2].cpu().numpy()
     print("\nFinal Predictions on Training Data:")    
     print(f"Predicted incidence range: [{pred_inci.min():.3e}, {pred_inci.max():.3e}]")
     print(f"Predicted incidence mean:  {pred_inci.mean():.3e}")
@@ -283,12 +296,13 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     t_data_tensor, _, _ = time_to_train()
     # evaluate the trained model on the training points
     # but these are between 0 and 1? 
+    multiplier = 1000 
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
-    S = out[:, 0].cpu().numpy()
-    E = out[:, 1].cpu().numpy()
-    I = out[:, 2].cpu().numpy()
-    R = out[:, 3].cpu().numpy()
+    S = out[:, 0].cpu().numpy() * multiplier
+    E = out[:, 1].cpu().numpy() * multiplier
+    I = out[:, 2].cpu().numpy() * multiplier
+    R = out[:, 3].cpu().numpy() * multiplier
     pred_beta = out[:, 4].cpu().numpy()
 
     # # check model consistency
@@ -301,6 +315,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
 
     print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
     print(f"S at end: {out[-1, 0]:.4f}")
+    #print(out[:, 2] * 1000)
 
     
     plt.figure(figsize=(14, 8)) 
@@ -310,6 +325,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     plt.plot(I, label="I(t)")
     plt.plot(R, label="R(t)")
     plt.ylabel("SEIR model")
+    plt.legend()
 
     plt.subplot(4, 1, 2)
     plt.plot(pred_beta, color="blue")
@@ -317,11 +333,13 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     plt.title("Beta(t)")
     plt.ylabel("Transmission Rate β(t)")
     plt.grid(True)
+    
 
     plt.subplot(4, 1, 3)
     plt.plot(obs, label="Observed Incidence")
     plt.plot(I, label="modelled I(t)")
     plt.ylabel("modelled vs observed I")
+    plt.legend()
 
     plt.subplot(4, 1, 4)
     plt.plot(loss_history, label="Total Loss")
@@ -351,112 +369,10 @@ def testm():
         )
         plot_model(m1, h1, fname)    
 
-
-# #Run everything
-# if __name__ == "__main__":
-#     N = 100000
-#     num_runs = 5
-#     #store errors for each run
-#     simple_error = []
-#     ceic_error = []
-
-#     #store beta for each run to see the variability across runs
-#     all_beta_simple = []
-#     all_beta_ceic = []
-
-#     all_C_simple = []
-#     all_C_ceic = []
+if __name__ == "__main__":
+    testm()   
+    # simple_model = load_model("vanilla_icx_datax.pth")
+    # plot_model(simple_model,[] , "vanilla_icx_datax")
+    # simple_model = load_model("causal_icx_datax.pth")
+    # plot_model(simple_model,[] , "causal_icx_datax")
     
-#     for run in range(num_runs):
-#         t_np_full, t_full, total_days = time_to_train()
-#         t_full_grad = torch.tensor(t_np_full.reshape(-1, 1), dtype=torch.float32, requires_grad=True)
-
-#         cases = get_syn_data()
-#         params = get_parama(total_days)
-#         sigma_array, gamma_array = params
-#         print("RUN:", run +1)
-#         #set_seed(run)
-        
-#         # print("Training simple PINN__")
-#         # model_simple, history_s, train_days = train_model(epochs = 20000, test_days= 65, causal= False,
-#         #                                                  epsilon = 3, save = True, model_name= f"simple_pinn_run_{run+1}")
-#         # print("Training CEIC PINN__")
-#         # model_ceic, history_c, train_days = train_model(epochs= 20000, test_days= 65, causal = True,
-#         #                                                epsilon = 3, save = True, model_name= f'ceic_pinn_run_{run+1}')
-#         # C_simple = compute_C_save(model_simple, t_full_grad, sigma_array, N, f"C_simple_run_{run+1}.npy")
-#         # C_ceic = compute_C_save(model_ceic,   t_full_grad, sigma_array, N, f"C_ceic_run_{run+1}.npy")
-#         #load model
-#         model_simple = load_model(f"simple_pinn_run_{run+1}.pth")
-#         model_ceic = load_model(f"ceic_pinn_run_{run+1}.pth")
-#         C_simple = np.load(f"C_simple_run_{run+1}.npy")
-#         C_ceic = np.load(f"C_ceic_run_{run+1}.npy")
-
-#         with torch.no_grad():
-#             out_simple = forward_with_constraints(model= model_simple, t = t_full).numpy()
-#             out_ceic = forward_with_constraints(model= model_ceic, t = t_full).numpy()
-
-#             beta_simple = out_simple[:, 4]  # beta is column 4
-#             beta_ceic   = out_ceic[:, 4]
-
-#             all_beta_simple.append(beta_simple)
-#             all_beta_ceic.append(beta_ceic)
-
-#             all_C_simple.append(C_simple)
-#             all_C_ceic.append(C_ceic)
-            
-#         #model_comparison(model_simple, model_ceic, t_full)
-
-#             #calling observed beta
-#         true_beta = data_gen.seasonal_beta(beta0=0.3, A=0.2, T=180, phase=0)(t_np_full)
-#         #true_beta = data_gen.piecewise_beta([0.1, 0.15, 0.25, 0.3, 0.4], [60,120, 240, 300])(t_np_full)
-#         #plot beta variability across runs for CEIC and true beta and simple PINN
-#         plt.figure(figsize=(14, 8))
-#         for i, beta in enumerate(all_beta_ceic):
-#             plt.plot(t_np_full, beta, color='blue', label='CEIC PINN')
-#         plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
-#         plt.title('Beta Variability Across Runs')
-#         plt.xlabel('Days')
-#         plt.ylabel('Beta')
-#         plt.legend()
-#         plt.savefig("beta_variability_and_ceic.png")
-#         plt.close()
-
-#         plt.figure(figsize=(14, 8))
-#         for i, beta in enumerate(all_beta_simple):
-#             plt.plot(t_np_full, beta, color='green', label='Simple PINN')
-#         plt.plot(t_np_full, true_beta, label = 'True Beta', color = 'red')
-#         plt.legend()
-#         plt.xlabel('Days')
-#         plt.ylabel('Beta')
-#         plt.savefig("beta_variability_and-simple.png")
-#         plt.close()
-
-#         #plot the observed data with simple and ceic prediction
-#         plt.figure(figsize=(14, 8))
-#         for i, C_simple in enumerate(all_C_simple):
-#             plt.plot(t_np_full, C_simple * N, label = 'simple pinn', color = 'orange')
-#         plt.plot(t_np_full, cases, label = 'observed', color = 'green')
-#         plt.legend()
-#         plt.savefig("comparison of Observed data , simple")
-#         plt.close()
-
-#         plt.figure(figsize=(14, 8))
-#         for i, C_ceic in enumerate(all_C_ceic):
-#             plt.plot(t_np_full, C_simple * N, label = 'ceic pinn', color = 'blue')
-#         plt.plot(t_np_full, cases, label = 'observed', color = 'green')
-#         plt.legend()
-#         plt.savefig("comparison of Observed data , ceic")
-#         plt.close()
-        
-
-        
-
-
-            
-
-        
-
-
-
-    
-
