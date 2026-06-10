@@ -14,7 +14,7 @@ from scipy.stats import gamma as gamma_dist
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 import random
-from data_gen import *
+from data_gen import generate_data_with_defaults, seasonal_beta
 
 print("Torch version:", torch.__version__)
 print("CUDA available:", torch.cuda.is_available())
@@ -159,7 +159,7 @@ def conservation_loss(model, t):
 def time_to_train(total_days = 730):
     # create time tensors, normalized from 0 to 1. 
     t_data_tensor = torch.linspace(0, 1, steps=total_days, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
-    t_colloc_tensor = torch.linspace(0, 1, steps=1000, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
+    t_colloc_tensor = torch.linspace(0, 1, steps=5000, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
     t_ic_tensor = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
     return t_data_tensor, t_colloc_tensor, t_ic_tensor
 
@@ -171,7 +171,7 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
     sigma, gamma, omega = get_parama()
     Ir_obs = cases / N # convert cases to a proportion
     obs_tensor = torch.tensor((Ir_obs), dtype=torch.float32, device=device) 
- 
+   
     # get time vector, np and tensor types\
     # plus a t0 tensor to pass to the IC loss function, 
     # since it needs to evaluate the model at t=0
@@ -188,7 +188,7 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
         elif ep < 3000:
             return 100.0, 100.0, 100.0   # gradually re-introduce physics
         else:
-            return 100.0, 1000.0, 1000.0   # full training
+            return 100.0, 2000.0, 1000.0   # full training
     
     history = []    
     logs = []   # store rows here
@@ -291,12 +291,27 @@ def plot_loss(l_history, fname = "training_history.png"):
     plt.savefig(f"{fname}_loss.png")
     #plt.close()
 
+def get_nn_interpolated_beta(model, time_tensor):
+    with torch.no_grad():
+         out = forward_with_constraints(model, time_tensor)
+    pred_beta = out[:, 4].cpu().detach().numpy()
+    pred_beta[0] = 0.15
+    #print(pred_beta[: 5])
+    #t_array = t_data_tensor.detach().numpy().reshape(-1)
+    # or 
+    t_array = time_tensor.detach().squeeze().numpy()
+    beta_fn = interp1d(t_array, pred_beta, kind='cubic')
+    return beta_fn 
+
+
 def plot_model(model, loss_history, fname = "model_predictions.png"):
     obs, true_beta = get_syn_data()
     t_data_tensor, _, _ = time_to_train()
+    print(t_data_tensor[:5])
     # evaluate the trained model on the training points
     # but these are between 0 and 1? 
     multiplier = 1000 
+
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
     S = out[:, 0].cpu().numpy() * multiplier
@@ -304,6 +319,30 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     I = out[:, 2].cpu().numpy() * multiplier
     R = out[:, 3].cpu().numpy() * multiplier
     pred_beta = out[:, 4].cpu().numpy()
+
+    
+    # test the interpolation function for beta
+    # time tensor between 0 and 730
+    t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
+    beta_fn = get_nn_interpolated_beta(model, t_tensor)
+    plt.figure(figsize=(10, 4))
+    t_test = np.linspace(0, 1.01, 730)
+    pred_beta_test = beta_fn(t_test)
+    #print(pred_beta_test)
+    plt.plot(t_test, pred_beta_test, label="Interpolated β(t)")
+
+
+    #computing the parameters of the predictive curve
+    beta_mean = pred_beta.mean()
+    beta_min = pred_beta.min()
+    beta_max= pred_beta.max()
+
+    #getting data using the predictive curve
+    data_nn, _ = generate_data_with_defaults(beta_fn)
+    #print(f"NN Data: {data_nn}")
+    
+
+    
 
     # # check model consistency
     total = out[:, :4].sum(dim=1)
@@ -316,7 +355,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
     print(f"S at end: {out[-1, 0]:.4f}")
     #print(out[:, 2] * 1000)
-
+    
     
     plt.figure(figsize=(14, 8)) 
     plt.subplot(4, 1, 1)
@@ -339,6 +378,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     plt.plot(obs, label="Observed Incidence")
     plt.plot(I, label="modelled I(t)")
     plt.ylabel("modelled vs observed I")
+    plt.plot(data_nn, label = 'nn_data')
     plt.legend()
 
     plt.subplot(4, 1, 4)
@@ -348,7 +388,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     plt.ylabel('Loss')
 
     plt.savefig(f"{fname}_check.png")
-    #plt.show()
+    plt.close()
     
 
 def testm(): 
@@ -367,12 +407,19 @@ def testm():
             causal = causal, 
             epsilon = 0.5 if causal else 0.0, 
         )
-        plot_model(m1, h1, fname)    
+        plot_model(m1, h1, fname) 
 
-if __name__ == "__main__":
-    testm()   
-    # simple_model = load_model("vanilla_icx_datax.pth")
-    # plot_model(simple_model,[] , "vanilla_icx_datax")
-    # simple_model = load_model("causal_icx_datax.pth")
-    # plot_model(simple_model,[] , "causal_icx_datax")
+#testm()
+simple_model = load_model("vanilla_icx_datax.pth")
+plot_model(simple_model, [], fname = "vanilla_icx_datax_final")
+ceic_model = load_model("causal_icx_datax.pth")
+plot_model(ceic_model, [], fname= "causal_icx_datax_final" )
+
+
+
+    
+
+   
+
+
     
