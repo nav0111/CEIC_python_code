@@ -159,6 +159,7 @@ def generate_data_with_defaults(betafn):
     return I, betafn(t)
 
 
+
 def plot_data(): 
     # TO DO : find the reproduction number for each of these, but remember 
     # beta(t) is temporal, so need to find a way to do this -- research this. 

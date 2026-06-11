@@ -14,7 +14,7 @@ from scipy.stats import gamma as gamma_dist
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 import random
-from data_gen import generate_data_with_defaults, seasonal_beta
+from data_gen import *
 
 print("Torch version:", torch.__version__)
 print("CUDA available:", torch.cuda.is_available())
@@ -283,31 +283,32 @@ def load_model(path):
     model.load_state_dict(torch.load(path))
     return model
 
-def plot_loss(l_history, fname = "training_history.png"):
-    plt.figure(figsize=(10, 4))
-    
-    plt.title('Training History')
-    plt.grid(True)
-    plt.savefig(f"{fname}_loss.png")
-    #plt.close()
+## move to data_gen.py later
+def map_range(value, old_min = 0, old_max = 730, new_min = 0, new_max = 1):
+    return ((value - old_min) / (old_max - old_min)) * (new_max - new_min) + new_min
 
-def get_nn_interpolated_beta(model, time_tensor):
+def create_pinn_beta_interpolation(model, nn_time):
     with torch.no_grad():
-         out = forward_with_constraints(model, time_tensor)
+         out = forward_with_constraints(model, nn_time)
     pred_beta = out[:, 4].cpu().detach().numpy()
-    #pred_beta[0] = 0.15
-    t_array = time_tensor.detach().squeeze().numpy()
-    beta_fn = interp1d(t_array, pred_beta, kind='cubic')
-    return beta_fn 
+    _t = nn_time.detach().squeeze().numpy()
+    beta_fn = interp1d(_t, pred_beta, kind='linear')
+    return beta_fn
 
-def test_beta_fun():
-    t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
-    t_data_tensor, _, _ = time_to_train()
-    model = load_model("vanilla_icx_datax.pth")
-    int_beta_fn = get_nn_interpolated_beta(model, t_tensor)
-    int_beta = int_beta_fn(t_data_tensor.detach().squeeze())
-    pred_beta = forward_with_constraints(model, t_data_tensor)[:, 4].detach()
-    return int_beta, pred_beta
+def pinn_beta(model, nn_time): 
+    int_beta_fn = create_pinn_beta_interpolation(model, nn_time)
+    def beta_fn(t): 
+        mt = map_range(t) # map time to 0, 1
+        bt = int_beta_fn(mt)
+        return bt
+    return beta_fn
+
+def test_seir_model(): 
+    t, _, _ = time_to_train()
+    m = load_model("causal_icx_datax.pth")
+    betafn = pinn_beta(m, t)
+    data3, beta3 = generate_data_with_defaults(betafn) 
+    return data3, beta3 
 
 def plot_model(model, loss_history, fname = "model_predictions.png"):
     obs, true_beta = get_syn_data()
@@ -329,12 +330,12 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     # test the interpolation function for beta
     # time tensor between 0 and 730
     t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
-    beta_fn = get_nn_interpolated_beta(model, t_tensor)
+    beta_fn = generate_data_with_defaults(model, t_data_tensor)
     plt.figure(figsize=(10, 4))
-    t_test = np.linspace(0, 1.01, 730)
-    pred_beta_test = beta_fn(t_test)
+    #t_test = np.linspace(0, 1.01, 730)
+    #pred_beta_test = beta_fn(t_test)
     #print(pred_beta_test)
-    plt.plot(t_test, pred_beta_test, label="Interpolated β(t)")
+    #plt.plot(t_test, pred_beta_test, label="Interpolated β(t)")
 
 
     #computing the parameters of the predictive curve
@@ -345,9 +346,6 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     #getting data using the predictive curve
     data_nn, _ = generate_data_with_defaults(beta_fn)
     #print(f"NN Data: {data_nn}")
-    
-
-    
 
     # # check model consistency
     total = out[:, :4].sum(dim=1)
@@ -378,8 +376,8 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     
 
     plt.subplot(4, 1, 3)
-    plt.plot(obs, label="Observed Incidence")
-    plt.plot(I, label="modelled I(t)")
+    #plt.plot(obs, label="Observed Incidence")
+    #plt.plot(I, label="modelled I(t)")
     plt.ylabel("modelled vs observed I")
     plt.plot(data_nn, label = 'nn_data')
     plt.legend()
