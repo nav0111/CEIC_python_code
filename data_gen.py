@@ -5,6 +5,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
+# from ceic_log import get_nn_beta
+
+# nn_beta = get_nn_beta()
+# nn_beta = None
+
+# def get_nn_beta():
+#     import ceic_log
+#     return ceic_log.get_nn_beta()
+    
+# nn_beta = get_nn_beta()
+
 
 # Your SEIR model should include a time-dependent beta function
 # Let's do 5 different scenarios for beta(t):
@@ -99,11 +110,15 @@ def piecewise_beta(beta_values, change_times):
 #sawtooth pattern is the transmission rate that increases linearly from beta_min to 
 # beta_max over a period of T, then drops back to beta_min and repeats the cycle.
 
-def sawtooth_beta(beta_min, beta_max, t0, T):
-    def beta_func(t):
-        beta = beta_min + (beta_max - beta_min) * ((t - t0) % T) / T
-        return beta
-    return beta_func
+# def sawtooth_beta(beta_min, beta_max, t0, T):
+#     def beta_func(t):
+#         beta = beta_min + (beta_max - beta_min) * ((t - t0) % T) / T
+#         return beta
+#     return beta_func
+
+# a function with nn betavalues
+#def nn_beta():
+
 
 #%%
 #generate incidence data from cumulative cases
@@ -140,8 +155,8 @@ def generate_data_with_defaults(betafn):
     R0 = 0
     C0 = 0 ### ? why I guess, initial infections. Let's start with 2 exposed. 
     sigma, gamma, omega = 1/5.2, 1/10, 1/60 # no waning immunity for now, so omega = 0.0
-    _, _, _, _, _, Z = gen_inci(betafn, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
-    return Z, betafn(t)
+    _, _, I, _, _, Z = gen_inci(betafn, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
+    return I, betafn(t)
 
 
 def plot_data(): 
@@ -152,17 +167,21 @@ def plot_data():
     beta_fn2 = sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400)
     beta_fn3 = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
     beta_fn4 = piecewise_beta(beta_values=[0.22, 0.10, 0.16], change_times=[120, 360])
-    beta_fn5 = sawtooth_beta(beta_min=0.10, beta_max=0.20, t0=0, T=180)
+    #beta_fn5 = sawtooth_beta(beta_min=0.10, beta_max=0.20, t0=0, T=180)
+    #beta_nn = nn_beta
+
     data1, beta1 = generate_data_with_defaults(beta_fn1) 
     data2, beta2 = generate_data_with_defaults(beta_fn2) 
     data3, beta3 = generate_data_with_defaults(beta_fn3) 
     data4, beta4 = generate_data_with_defaults(beta_fn4) 
-    data5, beta5 = generate_data_with_defaults(beta_fn5) 
+    #data5, beta5 = generate_data_with_defaults(beta_fn5) 
+    #data_nn, beta_nn_val = generate_data_with_defaults(beta_nn)
+
     print(f"final size: {data1.sum()}")
     print(f"final size: {data2.sum()}")
     print(f"final size: {data3.sum()}")
     print(f"final size: {data4.sum()}")
-    print(f"final size: {data5.sum()}")
+    #print(f"final size: {data5.sum()}")
     # code that will run when we execute this file directly, 
     # but not when we import it as a module in another file.    
     plt.figure(figsize=(16, 10))
@@ -172,10 +191,13 @@ def plot_data():
     plt.plot(data2, label = 'sigmoid beta')
     plt.subplot(2, 5, 3)
     plt.plot(data3, label = 'seasonal beta')
+    #nn_data
+    #plt.plot(data_nn, label = 'nn_beta')
+
     plt.subplot(2, 5, 4)
     plt.plot(data4, label = 'piecewise beta')
     plt.subplot(2, 5, 5)
-    plt.plot(data5, label = 'sawtooth beta')
+    #plt.plot(data5, label = 'sawtooth beta')
 
     plt.subplot(2, 5, 6)
     beta_val = [beta_fn1(x) for x in range(730)]
@@ -186,17 +208,23 @@ def plot_data():
 
     plt.subplot(2, 5, 8)
     plt.plot(beta_fn3(np.arange(730)), label = 'seasonal beta')
+    #plt.plot(beta_nn_val, label = 'nn beta')
+    plt.legend()
 
     plt.subplot(2, 5, 9)
     plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
 
-    plt.subplot(2, 5, 10)
-    plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
+    #plt.subplot(2, 5, 10)
+    #plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
     plt.savefig('Five_incidence_curves.png')
     plt.close()
 
 if __name__ == "__main__":
     print("main run.")
+    plot_data()
+  
+
+
 
     
 

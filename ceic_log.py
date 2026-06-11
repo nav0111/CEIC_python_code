@@ -295,14 +295,19 @@ def get_nn_interpolated_beta(model, time_tensor):
     with torch.no_grad():
          out = forward_with_constraints(model, time_tensor)
     pred_beta = out[:, 4].cpu().detach().numpy()
-    pred_beta[0] = 0.15
-    #print(pred_beta[: 5])
-    #t_array = t_data_tensor.detach().numpy().reshape(-1)
-    # or 
+    #pred_beta[0] = 0.15
     t_array = time_tensor.detach().squeeze().numpy()
     beta_fn = interp1d(t_array, pred_beta, kind='cubic')
     return beta_fn 
 
+def test_beta_fun():
+    t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
+    t_data_tensor, _, _ = time_to_train()
+    model = load_model("vanilla_icx_datax.pth")
+    int_beta_fn = get_nn_interpolated_beta(model, t_tensor)
+    int_beta = int_beta_fn(t_data_tensor.detach().squeeze())
+    pred_beta = forward_with_constraints(model, t_data_tensor)[:, 4].detach()
+    return int_beta, pred_beta
 
 def plot_model(model, loss_history, fname = "model_predictions.png"):
     obs, true_beta = get_syn_data()
@@ -354,9 +359,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
 
     print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
     print(f"S at end: {out[-1, 0]:.4f}")
-    #print(out[:, 2] * 1000)
-    
-    
+
     plt.figure(figsize=(14, 8)) 
     plt.subplot(4, 1, 1)
     plt.plot(S, label="S(t)")
@@ -389,6 +392,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
 
     plt.savefig(f"{fname}_check.png")
     plt.close()
+
     
 
 def testm(): 
@@ -408,12 +412,31 @@ def testm():
             epsilon = 0.5 if causal else 0.0, 
         )
         plot_model(m1, h1, fname) 
+#plot nn_beta and nn_data
+def plot_data_seasonal(model):
+    obs, seasonal_beta = get_syn_data()
+    fig, ax1 = plt.subplots()
+    ax1.set_xlabel('days')
+    ax1.set_ylabel('observed I(t)', color= 'red')
+    ax1.plot(obs, color= 'red')
+
+    ax2 = ax1.twinx()  # instantiate a second Axes that shares the same x-axis
+    ax2.set_ylabel('seasonal_beta', color= 'blue')  # we already handled the x-label with ax1
+    ax2.plot(seasonal_beta, color= 'blue')
+    ax1.set_yticks([])
+    ax2.set_yticks([])
+    ax1.set_xticks([])
+    plt.savefig("plot_with_seasonal_beta_and_data.png")
+    plt.close()
+    
 
 #testm()
-simple_model = load_model("vanilla_icx_datax.pth")
-plot_model(simple_model, [], fname = "vanilla_icx_datax_final")
-ceic_model = load_model("causal_icx_datax.pth")
-plot_model(ceic_model, [], fname= "causal_icx_datax_final" )
+# simple_model = load_model("vanilla_icx_datax.pth")
+# plot_model(simple_model, [], fname = "vanilla_icx_datax_final")
+# ceic_model = load_model("causal_icx_datax.pth")
+# plot_model(ceic_model, [], fname= "causal_icx_datax_final" )
+
+# plot_data_seasonal(simple_model)
 
 
 
