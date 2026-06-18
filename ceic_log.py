@@ -275,13 +275,17 @@ def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_na
     print(f"Actual l_data:             {l_data.item():.3e}")
 
     if save: 
-        torch.save(model.state_dict(), f"{model_name}.pth") 
+        torch.save({
+        'model_state_dict': model.state_dict(),'loss_history': history, }, f"{model_name}.pth")
+    #     torch.save(model.state_dict(), f"{model_name}.pth") 
     return model, history
 
 def load_model(path):
+    load_history = torch.load(path)
     model = create_model().to(device)
-    model.load_state_dict(torch.load(path))
-    return model
+    model.load_state_dict(load_history['model_state_dict'])
+    history = load_history['loss_history']  
+    return model, history
 
 ## move to data_gen.py later
 def map_range(value, old_min = 0, old_max = 730, new_min = 0, new_max = 1):
@@ -329,9 +333,9 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     
     # test the interpolation function for beta
     # time tensor between 0 and 730
-    t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
-    beta_fn = generate_data_with_defaults(model, t_data_tensor)
-    plt.figure(figsize=(10, 4))
+    #t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
+    #beta_fn = (model, t_data_tensor)
+    #plt.figure(figsize=(10, 4))
     #t_test = np.linspace(0, 1.01, 730)
     #pred_beta_test = beta_fn(t_test)
     #print(pred_beta_test)
@@ -339,57 +343,80 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
 
 
     #computing the parameters of the predictive curve
-    beta_mean = pred_beta.mean()
-    beta_min = pred_beta.min()
-    beta_max= pred_beta.max()
-
-    #getting data using the predictive curve
-    data_nn, _ = generate_data_with_defaults(beta_fn)
-    #print(f"NN Data: {data_nn}")
+    # beta_mean = pred_beta.mean()
+    # beta_min = pred_beta.min()
+    # beta_max= pred_beta.max()
 
     # # check model consistency
     total = out[:, :4].sum(dim=1)
-    print(f"Conservation: min={total.min():.4f}, max={total.max():.4f}")
+    # print(f"Conservation: min={total.min():.4f}, max={total.max():.4f}")
 
-    print(f"β range: [{pred_beta.min():.4f}, {pred_beta.max():.4f}]")
-    print(f"β mean: {pred_beta.mean():.4f}")
-    print(f"True β range: [0.098, 0.182] (for seasonal 0.14 ± 30%)")
+    # print(f"β range: [{pred_beta.min():.4f}, {pred_beta.max():.4f}]")
+    # print(f"β mean: {pred_beta.mean():.4f}")
+    # print(f"True β range: [0.098, 0.182] (for seasonal 0.14 ± 30%)")
 
-    print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
-    print(f"S at end: {out[-1, 0]:.4f}")
+    # print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
+    # print(f"S at end: {out[-1, 0]:.4f}")
 
-    plt.figure(figsize=(14, 8)) 
-    plt.subplot(4, 1, 1)
+    print(f"MSE_beta: {((pred_beta - true_beta)**2).mean() * 100}")
+    print(f"MSE_observed: {((I - obs)**2).mean() *100 }")
+
+    plt.figure(figsize=(6, 2)) 
     plt.plot(S, label="S(t)")
     plt.plot(E, label="E(t)")
     plt.plot(I, label="I(t)")
     plt.plot(R, label="R(t)")
     plt.ylabel("SEIR model")
+    plt.xlabel("Days")
     plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.savefig(f"{fname}_seir.pdf", bbox_inches='tight', pad_inches=0)
+    plt.close()
 
-    plt.subplot(4, 1, 2)
-    plt.plot(pred_beta, color="blue")
-    plt.plot(true_beta, color="black")
-    plt.title("Beta(t)")
+    plt.figure(figsize=(6,2))
+    plt.plot(pred_beta, color="green", label = 'Predicted β(t)')
+    plt.plot(true_beta, color="black", label = 'True β(t)')
+    #plt.title("Beta(t)")
     plt.ylabel("Transmission Rate β(t)")
     plt.grid(True)
-    
-
-    plt.subplot(4, 1, 3)
-    #plt.plot(obs, label="Observed Incidence")
-    #plt.plot(I, label="modelled I(t)")
-    plt.ylabel("modelled vs observed I")
-    plt.plot(data_nn, label = 'nn_data')
+    plt.xlabel("Days")
+    plt.ylabel("β(t)")
     plt.legend()
-
-    plt.subplot(4, 1, 4)
-    plt.plot(loss_history, label="Total Loss")
+    plt.tight_layout()
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.savefig(f"{fname}_check_true_beta_pred_beta.pdf", bbox_inches='tight', pad_inches=0)
+    plt.close()
+    
+    plt.figure(figsize=(6,2))
+    plt.plot(obs, label="Observed Incidence", color = 'green')
+    plt.plot(I + 1.5, label="Predicted Incidence", color = 'black')
+    plt.ylabel("modelled vs observed I")
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.xlabel("Days")
+    plt.ylabel("Incidence")
+    plt.savefig(f"{fname}_check_observed_vs_pred_I(t).pdf", bbox_inches='tight', pad_inches=0)
+ 
+    plt.figure(figsize=(6,2))
+    plt.plot(loss_history, label="Total Loss", color = 'black')
+    plt.legend()
+    plt.grid()
     plt.yscale('log')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-
-    plt.savefig(f"{fname}_check.png")
+    plt.ylabel('Log Loss')
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    plt.savefig(f"{fname}_check_loss_history.pdf", bbox_inches='tight', pad_inches=0)
     plt.close()
+
+
 
     
 
@@ -410,31 +437,46 @@ def testm():
             epsilon = 0.5 if causal else 0.0, 
         )
         plot_model(m1, h1, fname) 
-#plot nn_beta and nn_data
+#plot seasonal_beta and seasonal_data
 def plot_data_seasonal(model):
+    t_tensor = torch.linspace(0,730,146)
     obs, seasonal_beta = get_syn_data()
-    fig, ax1 = plt.subplots()
-    ax1.set_xlabel('days')
-    ax1.set_ylabel('observed I(t)', color= 'red')
-    ax1.plot(obs, color= 'red')
+    epsi = 0.8
+    uu = np.random.uniform(0, 1, size = len(obs))
+    noise = 1 - epsi + 2*epsi*uu
+    noisy_inci = obs * noise
+    noisy_inci = noisy_inci[::5]
+    print(noisy_inci[:10])
+    print(len(noisy_inci))
+ 
+    fig, ax1 = plt.subplots(figsize = (20,6.5))
 
+    ax1.set_xlabel('Days')
+    ax1.set_ylabel('Observed Cases', color= 'Black')
+    ax1.plot(t_tensor, noisy_inci, color= 'black', alpha=0.9, label='Observed Cases')
+    #ax1.scatter(t_tensor, noisy_inci, color= 'black', alpha=0.9, s = 0.7,  label='Observed I(t)')
+    ax1.spines['top'].set_visible(False)
     ax2 = ax1.twinx()  # instantiate a second Axes that shares the same x-axis
-    ax2.set_ylabel('seasonal_beta', color= 'blue')  # we already handled the x-label with ax1
-    ax2.plot(seasonal_beta, color= 'blue')
-    ax1.set_yticks([])
-    ax2.set_yticks([])
-    ax1.set_xticks([])
-    plt.savefig("plot_with_seasonal_beta_and_data.png")
-    plt.close()
+    ax2.set_ylabel('β(t)', color= 'Black')  # we already handled the x-label with ax1
+    ax2.plot(seasonal_beta, color= 'grey', label = ' β(t)')
     
+    ax2.spines['top'].set_visible(False)
+    ax1.set_xticks(t_tensor)
+    ax1.set_xticklabels([])
+    ax1.set_yticklabels([])
+    ax2.set_yticklabels([])
+    plt.savefig("plot_with_seasonal_beta_and_data.pdf")
+    plt.close()
+
+ 
 
 #testm()
-# simple_model = load_model("vanilla_icx_datax.pth")
-# plot_model(simple_model, [], fname = "vanilla_icx_datax_final")
+simple_model , history= load_model("vanilla_icx_datax.pth")
+plot_model(simple_model, history , fname = "vanilla_icx_datax_final")
 # ceic_model = load_model("causal_icx_datax.pth")
 # plot_model(ceic_model, [], fname= "causal_icx_datax_final" )
 
-# plot_data_seasonal(simple_model)
+##plot_data_seasonal(simple_model)
 
 
 
