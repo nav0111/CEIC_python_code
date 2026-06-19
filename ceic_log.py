@@ -19,6 +19,12 @@ from data_gen import *
 print("Torch version:", torch.__version__)
 print("CUDA available:", torch.cuda.is_available())
 print("CUDA device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+print("Disabling TF32 for full FP32 precision on modern GPUs.")
+# Disable TF32 to force full FP32 precision on modern GPUs
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+# enable 64bit 
+torch.set_default_dtype(torch.float64)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,17 +37,8 @@ def set_seed(seed):
 def get_syn_data():
     # get the incidence curve and the beta curve
     betafn = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
-    data3, beta3 = generate_data_with_defaults(betafn) 
-    return data3, beta3 
-
-#synthetic data params
-def get_parama():
-    """Constant sigma and gamma for synthetic data"""
-    sigma_t = 1/5.2
-    gamma_t = 1/10
-    omega_t = 1/60
-    params = sigma_t, gamma_t, omega_t
-    return params
+    prev, incidence, beta = generate_data_with_defaults(betafn) 
+    return prev, incidence, beta
 
 def create_model():
     model = nn.Sequential(
@@ -132,9 +129,15 @@ def ic_loss(model, ICs, t0):
     S0, E0, I0, R0 = ICs
     out = forward_with_constraints(model, t0)
     pred = out[0, :4]  # selects columns 0, 1, 2, 3, corresponding to S, E, I, R at t =0
-    target = torch.tensor([S0, E0, I0, R0], dtype=torch.float32, device=device)
+    target = torch.tensor([S0, E0, I0, R0], device=device)
+
+    # test, what if we help beta(0) 
+    #pred_beta0 = out[0, 4]
+    #target_beta0 = torch.tensor(0.14, device=device)
+
     v_loss = ((pred - target)**2).mean()
-    return v_loss
+    #b_loss = (pred_beta0 - target_beta0)**2
+    return v_loss 
 
 def data_loss(model, tk, observed):
     # data loss, run the model on the time tensor
@@ -158,33 +161,37 @@ def conservation_loss(model, t):
 
 def time_to_train(total_days = 730):
     # create time tensors, normalized from 0 to 1. 
-    t_data_tensor = torch.linspace(0, 1, steps=total_days, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
-    t_colloc_tensor = torch.linspace(0, 1, steps=5000, device=device, dtype=torch.float32).reshape(-1, 1).requires_grad_()
-    t_ic_tensor = torch.tensor([[0.0]], dtype=torch.float32, device=device, requires_grad=True)
+    t_data_tensor = torch.linspace(0, 1, steps=total_days, device=device).reshape(-1, 1).requires_grad_()
+    t_colloc_tensor = torch.linspace(0, 1, steps=10000, device=device).reshape(-1, 1).requires_grad_()
+    t_ic_tensor = torch.tensor([[0.0]], device=device, requires_grad=True)
     return t_data_tensor, t_colloc_tensor, t_ic_tensor
 
-def train_model(epochs=6000, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
+def train_model(observed, epochs=6000, causal = False, epsilon = 3, save = False, model_name = 'pinn_model'):
     # general parameters used in the model
-    N = 1000
-    ICs = [(N-5)/N, 0, 5/N, 0] # no covid cases at the start, seed with 1 or 2 or 10
-    cases, _ = get_syn_data()
-    sigma, gamma, omega = get_parama()
-    Ir_obs = cases / N # convert cases to a proportion
-    obs_tensor = torch.tensor((Ir_obs), dtype=torch.float32, device=device) 
+    print(f"saved model (yes/no): {save}, name: {model_name}, epochs={epochs}, epsilon={epsilon}")
+    N, S0, E0, I0, R0, _ = get_initial_conditions() # get initial conditions
+    #prev, _, _ = get_syn_data() # get SEIR generated curve
+    sigma, gamma, omega = get_parama() # get SEIR params 
+    
+    # set up data for loss functions 
+    Ir_obs = observed / N # convert cases to a proportion
+    obs_tensor = torch.tensor((Ir_obs), dtype=torch.float32, device=device)
+    ICs = [(N - I0)/N, E0, I0/N, R0] 
    
-    # get time vector, np and tensor types\
-    # plus a t0 tensor to pass to the IC loss function, 
-    # since it needs to evaluate the model at t=0
+    # get time, colocation tensors 
     max_time = len(Ir_obs)
     t_data_tensor, t_colloc_tensor, t_ic_tensor = time_to_train(max_time)
- 
+    print(f"length of time tensor (obs): {len(t_data_tensor)}")
+    print(f"length of time tensor (colloc): {len(t_colloc_tensor)}")
+    print(f"length of time tensor (IC): {len(t_ic_tensor)}")
+
     # Create model
     model = create_model().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     def get_weights(ep):
         if ep < 1000:
-            return 100.0, 1.0, 1.0   # data-driven warmup, no physics
+            return 100.0, 100.0, 1.0   # data-driven warmup, no physics
         elif ep < 3000:
             return 100.0, 100.0, 100.0   # gradually re-introduce physics
         else:
@@ -287,8 +294,10 @@ def load_model(path):
     history = load_history['loss_history']  
     return model, history
 
-## move to data_gen.py later
+
 def map_range(value, old_min = 0, old_max = 730, new_min = 0, new_max = 1):
+    # move to data_gen.py later
+    # functions maps (0, 1) <-> (0, 730) for time scaling
     return ((value - old_min) / (old_max - old_min)) * (new_max - new_min) + new_min
 
 def create_pinn_beta_interpolation(model, nn_time):
@@ -297,9 +306,11 @@ def create_pinn_beta_interpolation(model, nn_time):
     pred_beta = out[:, 4].cpu().detach().numpy()
     _t = nn_time.detach().squeeze().numpy()
     beta_fn = interp1d(_t, pred_beta, kind='linear')
-    return beta_fn
+    return beta_fn # this is now a function of one variable.
 
 def pinn_beta(model, nn_time): 
+    # this method is similar to the beta functions defined in data_gen
+    ## the nn_time time is the tensor at which the neural network is trained. 
     int_beta_fn = create_pinn_beta_interpolation(model, nn_time)
     def beta_fn(t): 
         mt = map_range(t) # map time to 0, 1
@@ -308,19 +319,19 @@ def pinn_beta(model, nn_time):
     return beta_fn
 
 def test_seir_model(): 
+    # this plots the SEIR curves when the beta function is 
+    # defined by the trained model.
     t, _, _ = time_to_train()
     m = load_model("causal_icx_datax.pth")
     betafn = pinn_beta(m, t)
     data3, beta3 = generate_data_with_defaults(betafn) 
     return data3, beta3 
 
-def plot_model(model, loss_history, fname = "model_predictions.png"):
-    obs, true_beta = get_syn_data()
+def plot_model(observed, model, loss_history, fname = "model_predictions"):
+    # get the observed data and time tensors 
+    _, _, true_beta = get_syn_data() 
     t_data_tensor, _, _ = time_to_train()
-    print(t_data_tensor[:5])
-    # evaluate the trained model on the training points
-    # but these are between 0 and 1? 
-    multiplier = 1000 
+    multiplier = 1000 # to map incidence back, this is N in the SEIR model.
 
     with torch.no_grad():
         out = forward_with_constraints(model, t_data_tensor)
@@ -329,37 +340,10 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     I = out[:, 2].cpu().numpy() * multiplier
     R = out[:, 3].cpu().numpy() * multiplier
     pred_beta = out[:, 4].cpu().numpy()
-
-    
-    # test the interpolation function for beta
-    # time tensor between 0 and 730
-    #t_tensor = torch.linspace(0, 730, steps = 730, device=device, dtype=torch.float32).reshape(-1, 1)
-    #beta_fn = (model, t_data_tensor)
-    #plt.figure(figsize=(10, 4))
-    #t_test = np.linspace(0, 1.01, 730)
-    #pred_beta_test = beta_fn(t_test)
-    #print(pred_beta_test)
-    #plt.plot(t_test, pred_beta_test, label="Interpolated β(t)")
-
-
-    #computing the parameters of the predictive curve
-    # beta_mean = pred_beta.mean()
-    # beta_min = pred_beta.min()
-    # beta_max= pred_beta.max()
-
-    # # check model consistency
     total = out[:, :4].sum(dim=1)
-    # print(f"Conservation: min={total.min():.4f}, max={total.max():.4f}")
-
-    # print(f"β range: [{pred_beta.min():.4f}, {pred_beta.max():.4f}]")
-    # print(f"β mean: {pred_beta.mean():.4f}")
-    # print(f"True β range: [0.098, 0.182] (for seasonal 0.14 ± 30%)")
-
-    # print(f"S range: [{out[:,0].min():.4f}, {out[:,0].max():.4f}]")
-    # print(f"S at end: {out[-1, 0]:.4f}")
-
+    
     print(f"MSE_beta: {((pred_beta - true_beta)**2).mean() * 100}")
-    print(f"MSE_observed: {((I - obs)**2).mean() *100 }")
+    print(f"MSE_observed: {((I - observed)**2).mean() *100 }")
 
     plt.figure(figsize=(6, 2)) 
     plt.plot(S, label="S(t)")
@@ -392,7 +376,7 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     plt.close()
     
     plt.figure(figsize=(6,2))
-    plt.plot(obs, label="Observed Incidence", color = 'green')
+    plt.plot(observed, label="Observed Incidence", color = 'green')
     plt.plot(I + 1.5, label="Predicted Incidence", color = 'black')
     plt.ylabel("modelled vs observed I")
     plt.legend()
@@ -416,31 +400,10 @@ def plot_model(model, loss_history, fname = "model_predictions.png"):
     plt.savefig(f"{fname}_check_loss_history.pdf", bbox_inches='tight', pad_inches=0)
     plt.close()
 
-
-
-    
-
-def testm(): 
-    is_causal_options = [False, True]  # False = Vanilla, True = Causal
-    
-    #for causal, w_ic, w_data in itertools.product(is_causal_options, ic_weights, data_weights):
-    for causal in is_causal_options:
-        model_type = "causal" if causal else "vanilla"
-        fname = f"{model_type}_icx_datax"
-        print(f"Starting Run: {fname}")
-        print(f"{'='*10}")
-        m1, h1 = train_model(
-            epochs = 10000,
-            save = True, 
-            model_name = fname, 
-            causal = causal, 
-            epsilon = 0.5 if causal else 0.0, 
-        )
-        plot_model(m1, h1, fname) 
 #plot seasonal_beta and seasonal_data
 def plot_data_seasonal(model):
     t_tensor = torch.linspace(0,730,146)
-    obs, seasonal_beta = get_syn_data()
+    obs, _, seasonal_beta = get_syn_data()
     epsi = 0.8
     uu = np.random.uniform(0, 1, size = len(obs))
     noise = 1 - epsi + 2*epsi*uu
@@ -466,23 +429,4 @@ def plot_data_seasonal(model):
     ax1.set_yticklabels([])
     ax2.set_yticklabels([])
     plt.savefig("plot_with_seasonal_beta_and_data.pdf")
-    plt.close()
-
- 
-
-#testm()
-simple_model , history= load_model("vanilla_icx_datax.pth")
-plot_model(simple_model, history , fname = "vanilla_icx_datax_final")
-# ceic_model = load_model("causal_icx_datax.pth")
-# plot_model(ceic_model, [], fname= "causal_icx_datax_final" )
-
-##plot_data_seasonal(simple_model)
-
-
-
-    
-
-   
-
-
-    
+    plt.close()    

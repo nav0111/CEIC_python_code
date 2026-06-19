@@ -144,21 +144,31 @@ def calculate_rt(t_arr, beta_func, susc_arr, N, gamma):
         R_t.append(beta_func(t) / gamma * susc_arr[t] / N) 
     return R_t
 
-#%% 
-# generate data with defaults
-def generate_data_with_defaults(betafn):
-    t = np.arange(730) 
+def get_initial_conditions(): 
     N = 1000
     E0 = 0
     I0 = 5
     S0 = N - I0
     R0 = 0
-    C0 = 0 ### ? why I guess, initial infections. Let's start with 2 exposed. 
-    sigma, gamma, omega = 1/5.2, 1/10, 1/60 # no waning immunity for now, so omega = 0.0
+    C0 = 0 
+    return N, S0, E0, I0, R0, C0
+
+#synthetic data params
+def get_parama():
+    """Constant sigma and gamma for synthetic data"""
+    sigma_t = 1/5.2
+    gamma_t = 1/10
+    omega_t = 1/60
+    return sigma_t, gamma_t, omega_t
+
+def generate_data_with_defaults(betafn):
+    # forward runs the SEIR model with the default parameters 
+    # returns the incidence curve, cumulative cases, and beta values over time.
+    t = np.arange(730) 
+    N, S0, E0, I0, R0, C0 = get_initial_conditions()
+    sigma, gamma, omega = get_parama() 
     _, _, I, _, _, Z = gen_inci(betafn, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
-    return I, betafn(t)
-
-
+    return I, Z, betafn(t)
 
 def plot_data(): 
     # TO DO : find the reproduction number for each of these, but remember 
@@ -171,13 +181,11 @@ def plot_data():
     #beta_fn5 = sawtooth_beta(beta_min=0.10, beta_max=0.20, t0=0, T=180)
     #beta_nn = nn_beta
 
-    data1, beta1 = generate_data_with_defaults(beta_fn1) 
-    data2, beta2 = generate_data_with_defaults(beta_fn2) 
-    data3, beta3 = generate_data_with_defaults(beta_fn3) 
-    data4, beta4 = generate_data_with_defaults(beta_fn4) 
-    #data5, beta5 = generate_data_with_defaults(beta_fn5) 
-    #data_nn, beta_nn_val = generate_data_with_defaults(beta_nn)
-
+    data1, Z1, beta1 = generate_data_with_defaults(beta_fn1) 
+    data2, Z2, beta2 = generate_data_with_defaults(beta_fn2) 
+    data3, Z3, beta3 = generate_data_with_defaults(beta_fn3) 
+    data4, Z4, beta4 = generate_data_with_defaults(beta_fn4) 
+    
     print(f"final size: {data1.sum()}")
     print(f"final size: {data2.sum()}")
     print(f"final size: {data3.sum()}")
@@ -219,10 +227,6 @@ def plot_data():
     #plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
     plt.savefig('Five_incidence_curves.png')
     plt.close()
-
-if __name__ == "__main__":
-    print("main run.")
-    plot_data()
   
 
 
