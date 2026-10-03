@@ -87,19 +87,22 @@ def integrate_linear_ode(dydt, y0, t_span, t_eval):
     return sol.y[0]
 
 #reconstruction from incidence
-def reconstruction_from_incidence(z_hat, beta_fn, sigma, gamma, omega, N, S0, E0,
+def reconstruction_from_incidence(z_hat, dz_hat_dt, beta_fn, sigma, gamma, omega, N, S0, E0,
                                   I0, R0, C0, t):
     e = z_hat / sigma
     # np.interp is used to interpolate the incidence data for integration
     i = integrate_linear_ode(lambda tt, I: np.interp(tt, t, z_hat) - gamma * I, I0, (0, len(t) - 1), t)
     r = integrate_linear_ode(lambda tt, R: gamma * np.interp(tt, t, i) - omega * R, R0, (0, len(t) - 1), t)
     s = N - e - i - r
-    return s, e, i, r
+    # beta = N*(dE/dt + sigma*E)/(S*I)
+    beta = N * (dz_hat_dt / sigma + z_hat) / (s * i) # Avoid division by zero
+    return s, e, i, r, beta
 
 #Main function to run
 def main():
     (t, S_true, E_true, I_true, R_true, C_true, Z_true, beta_true,
     sigma, gamma, omega, N) = get_true_data()
+    beta_true = beta_true(t) #beta_true is a function, evaluate it at t
     max_time = t[-1]
     tau_data = torch.linspace(0, 1.0, len(t), device = device).reshape(-1, 1)
     z_obs = torch.tensor(Z_true[:, None], device = device)
@@ -117,7 +120,8 @@ def main():
     z_hat_np = z_hat.detach().cpu().numpy().flatten()
     dz_hat_dt_np = dz_hat_dt.detach().cpu().numpy().flatten()
 
-    rec_nn = reconstruction_from_incidence(z_hat_np, beta_true, sigma, gamma, omega, N,
+    rec_nn = reconstruction_from_incidence(z_hat_np, dz_hat_dt_np,beta_true,
+                                            sigma, gamma, omega, N,
                                            S_true[0], E_true[0], I_true[0],
                                            R_true[0], C_true[0], t)
 
@@ -128,7 +132,8 @@ def main():
         "I_true": I_true, "I_rec_after_NN": rec_nn[2],
         "R_true": R_true, "R_rec_after_NN": rec_nn[3],
         "C_true": C_true,
-        "Z_true": Z_true, "Z_NN": z_hat_np, "dZ_NN_dt": dz_hat_dt_np
+        "Z_true": Z_true, "Z_NN": z_hat_np, "dZ_NN_dt": dz_hat_dt_np,
+        "beta_true": beta_true, "beta_rec_after_NN": rec_nn[4]
 
     }).to_csv(os.path.join(Output_Dir, "reconstruction_results.csv"), index= False)
 
@@ -147,7 +152,8 @@ def main():
         ("S", S_true, rec_nn[0]),
         ("E", E_true, rec_nn[1]),
         ("I", I_true, rec_nn[2]),
-        ("R", R_true, rec_nn[3])
+        ("R", R_true, rec_nn[3]),
+        ("beta", beta_true, rec_nn[4])
     ]:
         plt.figure(figsize=(10, 5))
         plt.plot(t, true_arr, label = f"True {name}", linewidth = 1.5)
