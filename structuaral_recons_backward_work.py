@@ -366,8 +366,8 @@ def main():
 
     predictions.to_csv(os.path.join(Output_Dir, "predictions.csv"),index=False)
 
-if __name__ == "__main__":
-    main()
+#if __name__ == "__main__":
+ #   main()
        
 
 
