@@ -28,8 +28,6 @@ BETA_SCENARIOS = {
     "constant":  lambda: constant_beta(0.14),
     "piecewise": lambda: piecewise_beta([0.10, 0.18, 0.12], [250, 550])}
 
-def relative_l2(est, true):
-    return float(np.linalg.norm(est - true) / max(np.linalg.norm(true), 1e-10))
 
 #True synthetic data
 def get_true_data(beta_fn):
@@ -344,7 +342,7 @@ def run_beta_scenarios(name, beta_fn):
 
     #Train the PINN
     weights = (1.0, 1.0, 1.0)
-    epochs = 15000
+    epochs = 1500
 
     S_pred, E_pred, I_pred, R_pred, beta_pred = train_model(S_model, E_model, I_model, R_model, beta_model,
                                                                tau_grad, Z_obs_tensor, struct_targets,weights, max_time, scales,epochs)
@@ -387,14 +385,7 @@ def run_beta_scenarios(name, beta_fn):
     })
 
     predictions.to_csv(os.path.join(Output_Dir, f"{name}_predictions.csv"),index=False)
-    return {
-        "scenario": name,
-        "S_rel_L2": relative_l2(S_pred, S_true),
-        "E_rel_L2": relative_l2(E_pred, E_true),
-        "I_rel_L2": relative_l2(I_pred, I_true),
-        "R_rel_L2": relative_l2(R_pred, R_true),
-        "beta_rel_L2": relative_l2(beta_pred, beta_true)
-    }
+    
 
 def main():
     results = []
@@ -406,7 +397,7 @@ def main():
 
 
 
-#if __name__ == "__main__":
- #   main()
+if __name__ == "__main__":
+   main()
        
 
