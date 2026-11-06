@@ -342,7 +342,7 @@ def run_beta_scenarios(name, beta_fn):
 
     #Train the PINN
     weights = (1.0, 1.0, 1.0)
-    epochs = 1500
+    epochs = 15000
 
     S_pred, E_pred, I_pred, R_pred, beta_pred = train_model(S_model, E_model, I_model, R_model, beta_model,
                                                                tau_grad, Z_obs_tensor, struct_targets,weights, max_time, scales,epochs)
@@ -397,7 +397,7 @@ def main():
 
 
 
-if __name__ == "__main__":
-   main()
+#if __name__ == "__main__":
+ #   main()
        
 
