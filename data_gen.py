@@ -48,18 +48,34 @@ from scipy.integrate import solve_ivp
 
 #%%
 #generate incidence data from cumulative cases
-def seir_model(t, y, beta_func, sigma, gamma, omega = 0.0):
-    S, E, I, R, C = y
-    N = S + E + I + R
-    beta = beta_func(t)
+# def seir_model(t, y, beta_func, sigma, gamma, omega = 0.0):
+#     S, E, I, R, C = y
+#     N = S + E + I + R
+#     beta = beta_func(t)
 
-    dSdt = -beta * S * I / N + omega * R
-    dEdt = beta * S * I / N - sigma * E
-    dIdt = sigma * E - gamma * I
-    dRdt = gamma * I - omega * R
-    dC_dt = sigma * E  # incidence per unit time is the rate of new infections
-    # solving SEIR means integration dC/dt which gives cumulative cases.
-    return [dSdt, dEdt, dIdt, dRdt, dC_dt]
+#     dSdt = -beta * S * I / N + omega * R
+#     dEdt = beta * S * I / N - sigma * E
+#     dIdt = sigma * E - gamma * I
+#     dRdt = gamma * I - omega * R
+#     dC_dt = sigma * E  # incidence per unit time is the rate of new infections
+#     # solving SEIR means integration dC/dt which gives cumulative cases.
+#     return [dSdt, dEdt, dIdt, dRdt, dC_dt]
+
+def seiuirs_model(t, y, beta_func, sigma, gamma, omega, rho_func):
+    S, E, Ir, Iu, R, C, Cr = y
+    N = S + E + Iu + Ir + R
+    beta = beta_func(t)
+    rho = rho_func(t)
+    infection = beta * S * (Iu + Ir) / N
+    dSdt = -infection + omega * R
+    dEdt = infection - sigma * E
+    dIrdt = rho * sigma * E - gamma * Ir
+    dIudt = (1 - rho) * sigma * E - gamma * Iu
+    dRdt = gamma * (Iu + Ir) - omega * R
+    dCdt = sigma * E          ## cumulative ALL new infections
+    dCrdt = rho * sigma * E   #cumulative reported  new infections
+    return [dSdt, dEdt, dIrdt, dIudt, dRdt, dCdt, dCrdt]
+
 #%%
 # beta functions
 #constant beta
@@ -104,6 +120,13 @@ def piecewise_beta(beta_values, change_times):
         return beta_values[idx]
     return beta_func
 
+
+#reporting rate p, written as a function of time
+def reporting_rate(rho0):
+    def rho_func(t):
+        return rho0
+    return rho_func
+
 #saw tooth beta function: β(t) = beta_min + (beta_max - beta_min) * ((t - t0) % T) / T
 #beta_min is the minimum transmission rate, beta_max is the maximum transmission rate,
 #t0 is the time at which the sawtooth function starts, and T is the period of the sawtooth function.
@@ -122,16 +145,29 @@ def piecewise_beta(beta_values, change_times):
 
 #%%
 #generate incidence data from cumulative cases
-def gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t):
-    y0 = [S0, E0, I0, R0, CuIn0] 
-    #solve the SEIR model using solve_ivp, which is a numerical solver for ODE.
-    #solve_ivp(fun, t_span, y0, args=(), t_eval=None, method='RK45', vectorized=False)),fun is the function that defines the system of ODEs, t_span is the time span for integration,y0 is the initial conditions, args are additional arguments to pass to the function like beta_func,sigma, gamma, t_eval is the time points at which to store the computed solution, method is the integration method to use (default is 'RK45'), and vectorized indicates whether fun is implemented in a vectorized fashion.
-    sol = solve_ivp(fun=seir_model, t_span=[t[0], t[-1]], y0=y0, args=(beta_func, sigma, gamma, omega), 
-                    t_eval=t, max_step= 0.1) # max_step is set to 0.1 to ensure we capture the dynamics accurately, especially if beta changes rapidly
-    S, E, I, R, C = sol.y
-    #convert cumulative incidence to daily incidence, prepend the initial cumulative incidence to the beginning of the array to maintain the same length
-    Z = np.maximum(np.diff(C, prepend=CuIn0), 0.0)
-    return S, E, I, R, C, Z
+# def gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t):
+#     y0 = [S0, E0, I0, R0, CuIn0] 
+#     #solve the SEIR model using solve_ivp, which is a numerical solver for ODE.
+#     #solve_ivp(fun, t_span, y0, args=(), t_eval=None, method='RK45', vectorized=False)),fun is the function that defines the system of ODEs, t_span is the time span for integration,y0 is the initial conditions, args are additional arguments to pass to the function like beta_func,sigma, gamma, t_eval is the time points at which to store the computed solution, method is the integration method to use (default is 'RK45'), and vectorized indicates whether fun is implemented in a vectorized fashion.
+#     sol = solve_ivp(fun=seir_model, t_span=[t[0], t[-1]], y0=y0, args=(beta_func, sigma, gamma, omega), 
+#                     t_eval=t, max_step= 0.1) # max_step is set to 0.1 to ensure we capture the dynamics accurately, especially if beta changes rapidly
+#     S, E, I, R, C = sol.y
+#     #convert cumulative incidence to daily incidence, prepend the initial cumulative incidence to the beginning of the array to maintain the same length
+#     Z = np.maximum(np.diff(C, prepend=CuIn0), 0.0)
+#     return S, E, I, R, C, Z
+
+def gen_inci(beta_func, sigma, gamma, omega, S0, E0, I0, R0, CuIn0, t, rho_func):
+    rho0 = rho_func(t[0])
+    Ir0 = rho0 * I0
+    Iu0 = (1 -rho0) * I0
+    CurIn0 = rho0 * CuIn0
+    y0 = [S0, E0, Ir0, Iu0, R0, CuIn0, CurIn0]
+    sol = solve_ivp(seiuirs_model, t_span=[t[0], t[-1]], y0 = y0, args= (beta_func, sigma, gamma, omega, rho_func),
+                    t_eval= t, max_step = 0.1)
+    S, E, Ir, Iu, R, C, Cr = sol.y
+    Z = np.maximum(np.diff(Cr, prepend = CurIn0), 0.0) #daily reported cases
+    return S, E, Ir, Iu, R, C, Z
+
 
 #%% 
 # calculate Rt, # t is time array
@@ -164,69 +200,79 @@ def get_parama():
 def generate_data_with_defaults(betafn):
     # forward runs the SEIR model with the default parameters 
     # returns the incidence curve, cumulative cases, and beta values over time.
-    t = np.arange(730) 
+    t = np.arange(830) 
     N, S0, E0, I0, R0, C0 = get_initial_conditions()
     sigma, gamma, omega = get_parama() 
-    _, _, I, _, _, Z = gen_inci(betafn, sigma, gamma, omega, S0, E0, I0, R0, C0, t)
-    return I, Z, betafn(t)
+    _, E, I, _, _, Z = gen_inci(betafn, sigma, gamma, omega, S0, E0, I0, R0, C0, t, rho_fn = reporting_rate(0.9))
+    return  E,I, Z, betafn(t)
 
-def plot_data(): 
-    # TO DO : find the reproduction number for each of these, but remember 
-    # beta(t) is temporal, so need to find a way to do this -- research this. 
-    # need this for your thesis/paper: report beta(t), shape/formula, the incidence curve, R_effective
-    beta_fn1 = constant_beta(0.11)
-    beta_fn2 = sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400)
-    beta_fn3 = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
-    beta_fn4 = piecewise_beta(beta_values=[0.22, 0.10, 0.16], change_times=[120, 360])
-    #beta_fn5 = sawtooth_beta(beta_min=0.10, beta_max=0.20, t0=0, T=180)
-    #beta_nn = nn_beta
+# def plot_data(): 
+#     # TO DO : find the reproduction number for each of these, but remember 
+#     # beta(t) is temporal, so need to find a way to do this -- research this. 
+#     # need this for your thesis/paper: report beta(t), shape/formula, the incidence curve, R_effective
+#     beta_fn1 = constant_beta(0.11)
+#     beta_fn2 = sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400)
+#     beta_fn3 = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
+#     beta_fn4 = piecewise_beta(beta_values=[0.22, 0.10, 0.16], change_times=[120, 360])
+#     #beta_fn5 = sawtooth_beta(beta_min=0.10, beta_max=0.20, t0=0, T=180)
+#     #beta_nn = nn_beta
 
-    data1, Z1, beta1 = generate_data_with_defaults(beta_fn1) 
-    data2, Z2, beta2 = generate_data_with_defaults(beta_fn2) 
-    data3, Z3, beta3 = generate_data_with_defaults(beta_fn3) 
-    data4, Z4, beta4 = generate_data_with_defaults(beta_fn4) 
+#     data1, Z1, beta1 = generate_data_with_defaults(beta_fn1) 
+#     data2, Z2, beta2 = generate_data_with_defaults(beta_fn2) 
+#     data3, Z3, beta3 = generate_data_with_defaults(beta_fn3) 
+#     data4, Z4, beta4 = generate_data_with_defaults(beta_fn4) 
     
-    print(f"final size: {data1.sum()}")
-    print(f"final size: {data2.sum()}")
-    print(f"final size: {data3.sum()}")
-    print(f"final size: {data4.sum()}")
-    #print(f"final size: {data5.sum()}")
-    # code that will run when we execute this file directly, 
-    # but not when we import it as a module in another file.    
-    plt.figure(figsize=(16, 10))
-    plt.subplot(2, 5, 1)
-    plt.plot(data1, label = 'constant beta')
-    plt.subplot(2, 5, 2)
-    plt.plot(data2, label = 'sigmoid beta')
-    plt.subplot(2, 5, 3)
-    plt.plot(data3, label = 'seasonal beta')
-    #nn_data
-    #plt.plot(data_nn, label = 'nn_beta')
+#     print(f"final size: {data1.sum()}")
+#     print(f"final size: {data2.sum()}")
+#     print(f"final size: {data3.sum()}")
+#     print(f"final size: {data4.sum()}")
+#     #print(f"final size: {data5.sum()}")
+#     # code that will run when we execute this file directly, 
+#     # but not when we import it as a module in another file.    
+#     plt.figure(figsize=(16, 10))
+#     plt.subplot(2, 5, 1)
+#     plt.plot(data1, label = 'constant beta')
+#     plt.subplot(2, 5, 2)
+#     plt.plot(data2, label = 'sigmoid beta')
+#     plt.subplot(2, 5, 3)
+#     plt.plot(data3, label = 'seasonal beta')
+#     #nn_data
+#     #plt.plot(data_nn, label = 'nn_beta')
 
-    plt.subplot(2, 5, 4)
-    plt.plot(data4, label = 'piecewise beta')
-    plt.subplot(2, 5, 5)
-    #plt.plot(data5, label = 'sawtooth beta')
+#     plt.subplot(2, 5, 4)
+#     plt.plot(data4, label = 'piecewise beta')
+#     plt.subplot(2, 5, 5)
+#     #plt.plot(data5, label = 'sawtooth beta')
 
-    plt.subplot(2, 5, 6)
-    beta_val = [beta_fn1(x) for x in range(730)]
-    plt.plot(beta_val, label = 'constant beta')
+#     plt.subplot(2, 5, 6)
+#     beta_val = [beta_fn1(x) for x in range(730)]
+#     plt.plot(beta_val, label = 'constant beta')
 
-    plt.subplot(2, 5, 7)
-    plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
+#     plt.subplot(2, 5, 7)
+#     plt.plot(beta_fn2(np.arange(730)), label = 'sigmoid beta')
 
-    plt.subplot(2, 5, 8)
-    plt.plot(beta_fn3(np.arange(730)), label = 'seasonal beta')
-    #plt.plot(beta_nn_val, label = 'nn beta')
-    plt.legend()
+#     plt.subplot(2, 5, 8)
+#     plt.plot(beta_fn3(np.arange(730)), label = 'seasonal beta')
+#     #plt.plot(beta_nn_val, label = 'nn beta')
+#     plt.legend()
 
-    plt.subplot(2, 5, 9)
-    plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
+#     plt.subplot(2, 5, 9)
+#     plt.plot(beta_fn4(np.arange(730)), label = 'piecewise beta')
 
-    #plt.subplot(2, 5, 10)
-    #plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
-    plt.savefig('Five_incidence_curves.png')
-    plt.close()
+#     #plt.subplot(2, 5, 10)
+#     #plt.plot(beta_fn5(np.arange(730)), label = 'sawtooth beta')
+#     plt.savefig('Five_incidence_curves.png')
+#     plt.close()
+
+# def plot_seasonal_data():
+#     beta_fn3 = seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0)
+#     data3, Z3, beta3 = generate_data_with_defaults(beta_fn3)
+#     plt.figure(figsize=(16, 10))
+#     plt.plot(data3, label = 'seasonal beta')
+#     plt.savefig('seasonal_incidence_curve.png')
+#     plt.close()
+
+# plot_seasonal_data()
   
 
 
