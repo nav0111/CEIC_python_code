@@ -19,15 +19,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Base_Dir = os.path.dirname(os.path.abspath(__file__))
 Output_Dir = os.path.join(Base_Dir, "structual_reconstruction_backward_results")
 os.makedirs(Output_Dir, exist_ok=True)
-Train = True
 
-#different true-beta(t) shapes to test the pipeline against -- the logbook
+#different true-beta(t) shapes
 BETA_SCENARIOS = {
-    "seasonal":  lambda: seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0),
-    "sigmoid":   lambda: sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400),
-    "constant":  lambda: constant_beta(0.14),
-    "piecewise": lambda: piecewise_beta([0.10, 0.18, 0.12], [250, 550])}
+    "seasonal": seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0),
+    "sigmoid": sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400),
+    "constant": constant_beta(0.14),
+    "piecewise": piecewise_beta([0.10, 0.18, 0.12], [250, 550])}
 
+#reporting rate function
+rho = 0.9
+rho_fn = reporting_rate(rho)
 
 #True synthetic data
 def get_true_data(beta_fn):
@@ -35,7 +37,8 @@ def get_true_data(beta_fn):
     N, S0, E0, I0, R0, C0 = get_initial_conditions()
     sigma, gamma, omega = get_parama()
     t = np.arange(830, dtype=np.float64)
-    S, E, I, R, C, Z = gen_inci(beta_fn, sigma, gamma, omega, S0, E0, I0, R0,C0, t)
+    S, E, Ir, Iu, R, C, Z = gen_inci(beta_fn, sigma, gamma, omega, S0, E0, I0, R0,C0, t, rho_fn)
+    I = Ir + Iu # total infected
     noise = np.random.normal(0.0, 0.1*np.max(Z), size = len(Z))
     Z_obs = np.maximum(0.0, (Z + noise))
     return t, S, E, I, R, C, Z, beta_fn, sigma, gamma, omega, N, Z_obs
@@ -129,7 +132,14 @@ def load_saved_incidence_model():
 #     return s, e, i, r, beta
 
 #solve the ODEs
-def sovle_odes(z_hat, dz_hat_dt, sigma, gamma, omega, N, I0, R0, t):
+def sovle_odes(z_hat, dz_hat_dt, sigma, gamma, omega,  N, I0, R0, t):
+    rho_t = rho_fn(t) * np.ones_like(t)
+    d_rho_dt = np.gradient(rho_t, t) # now it's zero, because rho is constant
+    z_hat_true = z_hat / rho_t
+    dz_hat_dt_true = (dz_hat_dt - z_hat_true * d_rho_dt) / rho_t
+    z_hat = z_hat_true
+    dz_hat_dt = dz_hat_dt_true
+
     e = z_hat / sigma
     def dIdt(tt,I):
         return np.interp(tt, t, z_hat) - gamma * I
@@ -194,12 +204,15 @@ def ode_loss(S_model, E_model, I_model, R_model, beta_model, t, max_time, scales
     return loss
 
 #function for data loss
-# def data_loss(E_model, t, Z_obs_tensor, E_scale):
-#     sigma,_, _ = get_parama()
-#     E = scaled_output(E_model, t, E_scale)
-#     Z_pred = sigma * E
-#     loss = torch.mean((Z_pred - Z_obs_tensor)**2)
-#     return loss
+def data_loss(E_model, t, Z_obs_tensor, E_scale, max_time):
+    sigma,_, _ = get_parama()
+    E = scaled_output(E_model, t, E_scale)
+    days = (t * max_time).detach().numpy().flatten()          
+    rho_t = rho_fn(days) * np.ones_like(days)
+    rho_t = torch.tensor(rho_t, dtype=torch.float32).reshape(-1, 1)
+    Z_pred = sigma * E * rho_t
+    loss = torch.mean((Z_pred - Z_obs_tensor)**2)
+    return loss
 
 #function for IC loss
 def ic_loss(S_model, E_model, I_model, R_model, t0, scales):
@@ -229,17 +242,16 @@ def train_model(S_model, E_model, I_model, R_model, beta_model, tau_grad, Z_obs_
     params = list(S_model.parameters()) + list(E_model.parameters()) + list(I_model.parameters()) + list(R_model.parameters()) + list(beta_model.parameters())
     optimizer = optim.Adam(params, lr= 0.001)
     t0 = tau_grad[0]
-    ode_weight, ic_weight, struct_weight = weights
+    ode_weight, data_weight, ic_weight, struct_weight = weights
 
     for epoch in range(epochs):
         optimizer.zero_grad()
         loss_ode = ode_loss(S_model, E_model, I_model, R_model, beta_model, tau_grad, max_time, scales)
-        #loss_data = data_loss(E_model, tau_grad, Z_obs_tensor, E_scale)
+        loss_data = data_loss(E_model, tau_grad, Z_obs_tensor, E_scale, max_time)
         loss_ic = ic_loss(S_model, E_model, I_model, R_model, t0, scales)
         loss_struct = struct_loss(S_model, E_model, I_model, R_model, tau_grad, struct_targets, scales)
 
-        total_loss = ode_weight * loss_ode  + ic_weight * loss_ic + struct_weight * loss_struct
-
+        total_loss = ode_weight * loss_ode + data_weight * loss_data + ic_weight * loss_ic + struct_weight * loss_struct
         total_loss.backward()
         optimizer.step()
         if epoch % 1000 == 0:
@@ -247,6 +259,7 @@ def train_model(S_model, E_model, I_model, R_model, beta_model, tau_grad, Z_obs_
                 f"Epoch {epoch},"
                 f"total={total_loss.item():.4f}, "
                 f"ode={loss_ode.item():.4f}, "
+                f"data={loss_data.item():.4f},"
                 f"ic={loss_ic.item():.4f}, "
                 f"struct={loss_struct.item():.4f}"
             )
@@ -263,7 +276,7 @@ def train_model(S_model, E_model, I_model, R_model, beta_model, tau_grad, Z_obs_
 def plot_results(name, t, true_data, struct_data, pinn_data):
     names = ["S", "E", "I", "R", "beta"]
     for j in range(5):
-        plt.plot(figsize=(12,4))
+        plt.figure(figsize=(12,4))
         plt.plot(t, true_data[j], label = "true", linewidth = 2)
         plt.plot(t, struct_data[j], label = "structural reconstruction", linestyle = "--")
         plt.plot(t, pinn_data[j], label = "PINN predictions")
@@ -341,7 +354,7 @@ def run_beta_scenarios(name, beta_fn):
     beta_model = create_model()
 
     #Train the PINN
-    weights = (1.0, 1.0, 1.0)
+    weights = (1.0, 1.0, 1.0, 1.0)
     epochs = 15000
 
     S_pred, E_pred, I_pred, R_pred, beta_pred = train_model(S_model, E_model, I_model, R_model, beta_model,
@@ -388,16 +401,13 @@ def run_beta_scenarios(name, beta_fn):
     
 
 def main():
-    results = []
     for name, beta_fn in BETA_SCENARIOS.items():
         print(f"Running scenario: {name}")
-        results.append(run_beta_scenarios(name, beta_fn()))
-    logbook_df = pd.DataFrame(results)
-    logbook_df.to_csv(os.path.join(Output_Dir, "beta_scenarios_logbook.csv"), index= False)
+        run_beta_scenarios(name, beta_fn)
+    
 
 
-
-#if __name__ == "__main__":
- #   main()
+# if __name__ == "__main__":
+#    main()
        
 
