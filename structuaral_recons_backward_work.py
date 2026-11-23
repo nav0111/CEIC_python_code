@@ -15,29 +15,32 @@ from data_gen import *
 # R(t) = by solving dR/dt = gamma * I(t) - omega * R(t) --- integration
 # S(t) = N - E(t) - I(t) - R(t)   (N, not 1 -- data_gen works in raw counts)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Base_Dir = os.path.dirname(os.path.abspath(__file__))
 Output_Dir = os.path.join(Base_Dir, "structual_reconstruction_backward_results")
 os.makedirs(Output_Dir, exist_ok=True)
 
 #different true-beta(t) shapes
 BETA_SCENARIOS = {
-    "seasonal": seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0),
-    "sigmoid": sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400),
-    "constant": constant_beta(0.14),
+    #"seasonal": seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0),
+    #"sigmoid": sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400),
+    #"constant": constant_beta(0.14),
     "piecewise": piecewise_beta([0.10, 0.18, 0.12], [250, 550])}
 
 #reporting rate function
-rho = 0.9
-rho_fn = reporting_rate(rho)
+RHO_TRUE = 1.0
+RHO_ASSUMED = 1.0
+rho_true_fn = reporting_rate(RHO_TRUE)
+rho_fn = reporting_rate(RHO_ASSUMED)
+
+np.random.seed(0)
+torch.manual_seed(0)
 
 #True synthetic data
 def get_true_data(beta_fn):
-    #beta_fn = seasonal_beta(beta0=0.14, A =0.3, T = 365, phase = 0)
     N, S0, E0, I0, R0, C0 = get_initial_conditions()
     sigma, gamma, omega = get_parama()
     t = np.arange(830, dtype=np.float64)
-    S, E, Ir, Iu, R, C, Z = gen_inci(beta_fn, sigma, gamma, omega, S0, E0, I0, R0,C0, t, rho_fn)
+    S, E, Ir, Iu, R, C, Z = gen_inci(beta_fn, sigma, gamma, omega, S0, E0, I0, R0,C0, t, rho_true_fn)
     I = Ir + Iu # total infected
     noise = np.random.normal(0.0, 0.1*np.max(Z), size = len(Z))
     Z_obs = np.maximum(0.0, (Z + noise))
@@ -70,19 +73,13 @@ def derivative(y,x):
     return torch.autograd.grad(y, x, grad_outputs= torch.ones_like(y),
                                create_graph= True, retain_graph= True)[0]
 
-#####checking the derivative function
-# def fn(x):
-#     return x**3
-
-# x = torch.tensor([1.0, 2.0, 3.0], requires_grad= True)
-# fnn = x**3
 
 def physical_derivative(y, tau, max_time):
     return derivative(y, tau) / max_time
 
 #fitting the NN to the daily incidence data
 def fit_incidence_nn(z_obs_tensor, tau_data):
-    model = create_model().to(device)
+    model = create_model()
     optimizer = optim.Adam(model.parameters(), lr = 0.001)
     for epoch in range(3000):
         optimizer.zero_grad()
@@ -104,33 +101,6 @@ def return_fitted_model():
     nn_model = fit_incidence_nn(z_obs, t)
     return t, nn_model
     
-
-#load saved incidence model
-def load_saved_incidence_model():
-    path = os.path.join(Output_Dir, "incidence_model.pt")
-    model = create_model().to(device)
-    model.load_state_dict(torch.load(path))
-    model.eval()
-    return model
-
-#The reconstruction equation integration part
-
-# def integrate_linear_ode(dydt, y0, t_span, t_eval):
-#     sol = solve_ivp(dydt, t_span, [y0], method='RK45', t_eval=t_eval, rtol=1e-6, atol=1e-9)
-#     return sol.y[0]
-
-# #reconstruction from incidence
-# def reconstruction_from_incidence(z_hat, dz_hat_dt, beta_fn, sigma, gamma, omega, N, S0, E0,
-#                                   I0, R0, C0, t):
-#     e = z_hat / sigma
-#     # np.interp is used to interpolate the incidence data for integration
-#     i = integrate_linear_ode(lambda tt, I: np.interp(tt, t, z_hat) - gamma * I, I0, (0, len(t) - 1), t)
-#     r = integrate_linear_ode(lambda tt, R: gamma * np.interp(tt, t, i) - omega * R, R0, (0, len(t) - 1), t)
-#     s = N - e - i - r
-#     # beta = N*(dE/dt + sigma*E)/(S*I)
-#     beta = N * (dz_hat_dt / sigma + z_hat) / (s * i) 
-#     return s, e, i, r, beta
-
 #solve the ODEs
 def sovle_odes(z_hat, dz_hat_dt, sigma, gamma, omega,  N, I0, R0, t):
     rho_t = rho_fn(t) * np.ones_like(t)
@@ -164,7 +134,6 @@ def sovle_odes(z_hat, dz_hat_dt, sigma, gamma, omega,  N, I0, R0, t):
 #testing interpolation
 def test_interpolation():
     data = get_true_data()
-    sigma, gamma, omega = get_parama()
     Z_true = data[6]
     time = torch.linspace(0, 1.0, len(Z_true)).reshape(-1, 1)
     model = create_model()
@@ -287,6 +256,19 @@ def plot_results(name, t, true_data, struct_data, pinn_data):
         plt.savefig(os.path.join(Output_Dir, f"{name}_{names[j]}_reconstruction.png"), dpi=200)
         plt.close()
 
+#plot beta error
+def plot_beta_error(name, t, beta_true, beta_pred, beta_struct):
+    plt.figure(figsize=(12,4))
+    plt.plot(np.abs(beta_true - beta_struct), linestyle = "--", label = "struct_beta_error", color = "green")
+    plt.plot(np.abs(beta_true - beta_pred), label = "pinn_beta_error", color = "red")
+    plt.xlabel("days")
+    plt.ylabel("estimated beta - true beta")
+    plt.legend()
+    plt.title(f"{name}: error in beta")
+    plt.savefig(os.path.join(Output_Dir, f"{name}_beta_error.png"))
+    plt.close()
+
+
 #define the main function
 def run_beta_scenarios(name, beta_fn):
     #Generate true data and the noisy incidence observations
@@ -367,6 +349,7 @@ def run_beta_scenarios(name, beta_fn):
     R_pred = R_pred.detach().numpy().flatten()
     beta_pred = beta_pred.detach().numpy().flatten()
 
+
     #prepare data for plotting
     true_data = (S_true, E_true, I_true, R_true, beta_true)
 
@@ -376,6 +359,11 @@ def run_beta_scenarios(name, beta_fn):
 
     # Plot all compartments and beta
     plot_results(name, t, true_data, struct_data, pinn_data)
+    plot_beta_error(name, t, beta_true, beta_pred, beta_struct)
+
+    print(f"beta_true: {np.argmax(beta_true)}")
+    print(f"beta_true: {np.argmax(beta_pred)}")
+    print(f"beta_true: {np.argmax(beta_struct)}")
 
     # Save numerical predictions
     predictions = pd.DataFrame({
@@ -405,7 +393,28 @@ def main():
         print(f"Running scenario: {name}")
         run_beta_scenarios(name, beta_fn)
     
+def post_analysis(fn):
+    df = pd.read_csv(fn)
+    btrue = df["beta_true"].to_numpy()
+    bstruc = df["beta_struct"].to_numpy()
+    bpinn = df["beta_PINN"].to_numpy()
+    peak_btrue = np.argmax(btrue[1:400])
+    peak_bstruct = np.argmax(bstruc[1:400])
+    peak_bpinn = np.argmax(bpinn[1:400])
+    shifted_btrue = btrue[1:830]
+    shifted_bstruct = bstruc[1:830]
+    shifted_bpinn = bpinn[1:830]
+    diff_btrue = np.diff(btrue[0:829] - shifted_btrue)
+    diff_bstruct = np.diff(bstruc[0:829] - shifted_bstruct)
+    diff_bpinn = np.diff(bpinn[0:829] - shifted_bpinn)
+    print(np.any(diff_btrue < 0))
+    print(np.any(diff_bstruct < 0))
+    print(np.any(diff_bpinn < 0))
 
+   # print(np.where(bpinn > .14))
+    print(np.where(bpinn > .172))
+
+    return diff_btrue, diff_bstruct, diff_bpinn
 
 # if __name__ == "__main__":
 #    main()
