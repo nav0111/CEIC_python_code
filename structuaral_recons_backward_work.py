@@ -8,6 +8,10 @@ import torch.optim as optim
 from scipy.integrate import solve_ivp
 from data_gen import *
 
+#experiment settings
+BETA_FACTOR = 20   
+TV_WEIGHT = 1.0     
+
 #fit a feedforward network to z_obs(t) first
 #structural reconstruction using the ODEs
 # Z(t) = sigma * E(t) => E(t) = Z(t) / sigma
@@ -16,15 +20,25 @@ from data_gen import *
 # S(t) = N - E(t) - I(t) - R(t)   (N, not 1 -- data_gen works in raw counts)
 
 Base_Dir = os.path.dirname(os.path.abspath(__file__))
-Output_Dir = os.path.join(Base_Dir, "structual_reconstruction_backward_results")
+Output_Dir = os.path.join(Base_Dir, f"drop_factor{BETA_FACTOR}_tv{TV_WEIGHT}")
 os.makedirs(Output_Dir, exist_ok=True)
+
+#start at some point beta0 then drop by drop_pct, at time t_drop
+def drop_beta(beta_0, drop_pct, t_drop):
+    beta_after = beta_0 * (1 - drop_pct / 100)
+    def beta_fn(t):
+        beta = np.where(t < t_drop, beta_0, beta_after)  #beta_0 if t<t_drop else beta_after; where the condition is True use a, otherwise use b
+        return beta
+    return beta_fn
+
 
 #different true-beta(t) shapes
 BETA_SCENARIOS = {
     #"seasonal": seasonal_beta(beta0=0.14, A=0.3, T=365, phase=0),
     #"sigmoid": sigmoid_beta(beta_low=0.10, beta_high=0.20, k=0.08, t0=400),
     #"constant": constant_beta(0.14),
-    "piecewise": piecewise_beta([0.10, 0.18, 0.12], [250, 550])}
+    #"piecewise": piecewise_beta([0.10, 0.18, 0.12], [250, 550]),
+    "drop": drop_beta(0.18, 40, 250)}
 
 #reporting rate function
 RHO_TRUE = 1.0
@@ -67,6 +81,10 @@ def positive_output(model, t):
 def scaled_output(model, t, scale):
     return scale * positive_output(model, t)
 
+#beta output: the input time is multiplied by BETA_FACTOR before the network,
+#so the first layer computes tanh(w*(20*tau) + b) = tanh(20*w*tau + b)
+def beta_output(model, t, scale):
+    return scale * model(BETA_FACTOR * t)**2
 
 #define derivative
 def derivative(y,x):
@@ -151,7 +169,7 @@ def ode_loss(S_model, E_model, I_model, R_model, beta_model, t, max_time, scales
     E = scaled_output(E_model, t, E_scale)
     I = scaled_output(I_model, t, I_scale)
     R = scaled_output(R_model, t, R_scale)
-    beta = scaled_output(beta_model, t, beta_scale)
+    beta = beta_output(beta_model, t, beta_scale)
     #derivative with respect to physical time
     dS_dt = physical_derivative(S, t, max_time)
     dE_dt = physical_derivative(E, t, max_time)
@@ -205,13 +223,20 @@ def struct_loss(S_model, E_model,I_model, R_model, t, struct_targets, scales):
     loss = torch.mean((S - s_struct_t)**2) + torch.mean((E - e_struct_t)**2) + torch.mean((I - i_struct_t)**2) + torch.mean((R - r_struct_t)**2)
     return loss
 
+#total variation of beta: how much beta moves in total over the whole time
+def tv_loss(beta_model, t, beta_scale, max_time):
+    beta = beta_output(beta_model, t, beta_scale)
+    dbeta_dt = physical_derivative(beta, t, max_time)
+    loss_tv = torch.mean(torch.abs(dbeta_dt)) * max_time
+    return loss_tv
+
 #function for training
 def train_model(S_model, E_model, I_model, R_model, beta_model, tau_grad, Z_obs_tensor, struct_targets, weights, max_time, scales, epochs):
     S_scale, E_scale, I_scale, R_scale, beta_scale = scales
     params = list(S_model.parameters()) + list(E_model.parameters()) + list(I_model.parameters()) + list(R_model.parameters()) + list(beta_model.parameters())
     optimizer = optim.Adam(params, lr= 0.001)
     t0 = tau_grad[0]
-    ode_weight, data_weight, ic_weight, struct_weight = weights
+    ode_weight, data_weight, ic_weight, struct_weight, tv_weight = weights
 
     for epoch in range(epochs):
         optimizer.zero_grad()
@@ -219,8 +244,9 @@ def train_model(S_model, E_model, I_model, R_model, beta_model, tau_grad, Z_obs_
         loss_data = data_loss(E_model, tau_grad, Z_obs_tensor, E_scale, max_time)
         loss_ic = ic_loss(S_model, E_model, I_model, R_model, t0, scales)
         loss_struct = struct_loss(S_model, E_model, I_model, R_model, tau_grad, struct_targets, scales)
+        loss_tv = tv_loss(beta_model, tau_grad, beta_scale, max_time)
 
-        total_loss = ode_weight * loss_ode + data_weight * loss_data + ic_weight * loss_ic + struct_weight * loss_struct
+        total_loss = ode_weight * loss_ode + data_weight * loss_data + ic_weight * loss_ic + struct_weight * loss_struct + tv_weight * loss_tv
         total_loss.backward()
         optimizer.step()
         if epoch % 1000 == 0:
@@ -230,14 +256,15 @@ def train_model(S_model, E_model, I_model, R_model, beta_model, tau_grad, Z_obs_
                 f"ode={loss_ode.item():.4f}, "
                 f"data={loss_data.item():.4f},"
                 f"ic={loss_ic.item():.4f}, "
-                f"struct={loss_struct.item():.4f}"
+                f"struct={loss_struct.item():.4f},"
+                f"tv_loss={loss_tv.item():.4f}"
             )
 
     S_pred = scaled_output(S_model, tau_grad, S_scale)
     E_pred = scaled_output(E_model, tau_grad, E_scale)
     I_pred = scaled_output(I_model, tau_grad, I_scale)
     R_pred = scaled_output(R_model, tau_grad, R_scale)
-    beta_pred = scaled_output(beta_model, tau_grad, beta_scale)
+    beta_pred = beta_output(beta_model, tau_grad, beta_scale)
     return S_pred, E_pred, I_pred, R_pred, beta_pred
 
 
@@ -279,7 +306,7 @@ def run_beta_scenarios(name, beta_fn):
     max_time = t[-1]
 
     tau_data = torch.linspace(0, 1.0, len(t)).reshape(-1, 1)
-    Z_obs_tensor = torch.tensor(Z_obs[:, None], dtype=torch.float32)
+    Z_obs_tensor = torch.tensor(Z_obs.reshape(-1, 1), dtype=torch.float32)
 
     # Plot observed incidence
     plt.figure(figsize=(10, 5))
@@ -336,7 +363,7 @@ def run_beta_scenarios(name, beta_fn):
     beta_model = create_model()
 
     #Train the PINN
-    weights = (1.0, 1.0, 1.0, 1.0)
+    weights = (1.0, 1.0, 1.0, 1.0, TV_WEIGHT)
     epochs = 15000
 
     S_pred, E_pred, I_pred, R_pred, beta_pred = train_model(S_model, E_model, I_model, R_model, beta_model,
@@ -362,12 +389,18 @@ def run_beta_scenarios(name, beta_fn):
     plot_beta_error(name, t, beta_true, beta_pred, beta_struct)
 
     print(f"beta_true: {np.argmax(beta_true)}")
-    print(f"beta_true: {np.argmax(beta_pred)}")
-    print(f"beta_true: {np.argmax(beta_struct)}")
+    print(f"beta_pinn: {np.argmax(beta_pred)}")
+    print(f"beta_struct: {np.argmax(beta_struct)}")
+
+    for d in range(320, 520, 3):
+        print(d, "Z_obs:", round(Z_obs[d], 2), "z_hat:", round(z_hat_np[d], 3),
+              "dz/dt:", round(dz_hat_dt_np[d], 3), "beta_struct:", round(beta_struct[d], 3))
 
     # Save numerical predictions
     predictions = pd.DataFrame({
         "t": t,
+        "Z_obs": Z_obs,
+        "Z_true": Z_true,
         "S_true": S_true,
         "S_struct": s_struct,
         "S_PINN": S_pred,
@@ -398,9 +431,9 @@ def post_analysis(fn):
     btrue = df["beta_true"].to_numpy()
     bstruc = df["beta_struct"].to_numpy()
     bpinn = df["beta_PINN"].to_numpy()
-    peak_btrue = np.argmax(btrue[1:400])
-    peak_bstruct = np.argmax(bstruc[1:400])
-    peak_bpinn = np.argmax(bpinn[1:400])
+    peak_btrue = np.argmin(btrue[1:400])
+    peak_bstruct = np.argmin(bstruc[1:400])
+    peak_bpinn = np.argmin(bpinn[1:400])
     shifted_btrue = btrue[1:830]
     shifted_bstruct = bstruc[1:830]
     shifted_bpinn = bpinn[1:830]
@@ -412,11 +445,11 @@ def post_analysis(fn):
     print(np.any(diff_bpinn < 0))
 
    # print(np.where(bpinn > .14))
-    print(np.where(bpinn > .172))
+    #print(np.where(bpinn > .172))
 
-    return diff_btrue, diff_bstruct, diff_bpinn
+    return peak_btrue, peak_bpinn, peak_bstruct
 
-# if __name__ == "__main__":
-#    main()
+if __name__ == "__main__":
+   main()
        
 
