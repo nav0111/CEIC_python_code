@@ -388,13 +388,9 @@ def run_beta_scenarios(name, beta_fn):
     plot_results(name, t, true_data, struct_data, pinn_data)
     plot_beta_error(name, t, beta_true, beta_pred, beta_struct)
 
-    print(f"beta_true: {np.argmax(beta_true)}")
-    print(f"beta_pinn: {np.argmax(beta_pred)}")
-    print(f"beta_struct: {np.argmax(beta_struct)}")
-
-    for d in range(320, 520, 3):
-        print(d, "Z_obs:", round(Z_obs[d], 2), "z_hat:", round(z_hat_np[d], 3),
-              "dz/dt:", round(dz_hat_dt_np[d], 3), "beta_struct:", round(beta_struct[d], 3))
+    # print(f"beta_true: {np.argmax(beta_true)}")
+    # print(f"beta_pinn: {np.argmax(beta_pred)}")
+    # print(f"beta_struct: {np.argmax(beta_struct)}")
 
     # Save numerical predictions
     predictions = pd.DataFrame({
@@ -449,7 +445,7 @@ def post_analysis(fn):
 
     return peak_btrue, peak_bpinn, peak_bstruct
 
-if __name__ == "__main__":
-   main()
+# if __name__ == "__main__":
+#    main()
        
 
